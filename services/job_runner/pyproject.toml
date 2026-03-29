@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aero-agent-job-runner"
+version = "0.1.0"
+description = "Background job runner for aerodynamic analysis jobs"
+requires-python = ">=3.12"
+dependencies = [
+  "aero-agent-cfd-core>=0.1.0",
+  "pydantic>=2.10.0",
+]
+ 
+[tool.setuptools]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["aero_agent_job_runner*"]

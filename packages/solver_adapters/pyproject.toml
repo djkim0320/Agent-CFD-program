@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "aero-agent-solver-adapters"
+version = "0.1.0"
+description = "Solver adapters skeleton for the aero agent workspace"
+requires-python = ">=3.12"
+dependencies = ["aero-agent-contracts>=0.1.0", "aero-agent-common>=0.1.0"]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]

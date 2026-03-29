@@ -1,0 +1,10 @@
+{
+  "name": "aero-agent-workspace",
+  "private": true,
+  "packageManager": "pnpm@10.30.0",
+  "scripts": {
+    "dev:gui": "pnpm --dir apps/gui dev",
+    "build:gui": "pnpm --dir apps/gui build",
+    "lint:gui": "pnpm --dir apps/gui lint"
+  }
+}
