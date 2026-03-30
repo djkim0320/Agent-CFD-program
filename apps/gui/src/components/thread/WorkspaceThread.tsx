@@ -2,6 +2,11 @@ import { useMemo } from "react";
 import { useShell } from "../../store/ShellProvider";
 import {
   canApprovePreflight,
+  describeAiReviewState,
+  describeJobAiReviewState,
+  describeJobEvent,
+  describeProviderState,
+  describeRuntimeState,
   formatMaybeNumber,
   formatTimestamp,
   getArtifactByKind,
@@ -10,6 +15,8 @@ import {
   getSelectedJobEvents,
   selectDraftNotes,
   selectSessionNotes,
+  summarizeNormalizationSummary,
+  summarizeRuntimeBlockerDetails,
 } from "../../store/selectors";
 import type { JobArtifact } from "../../lib/types";
 import { EmptyState } from "../common/EmptyState";
@@ -36,6 +43,34 @@ function ArtifactPanel({ artifacts, onSelect }: { artifacts: JobArtifact[]; onSe
           <small>{artifact.path}</small>
         </button>
       ))}
+    </div>
+  );
+}
+
+function WarningList({
+  label,
+  items,
+}: {
+  label: string;
+  items: string[];
+}) {
+  if (items.length === 0) {
+    return (
+      <div className="warning-block warning-block--muted">
+        <span>{label}</span>
+        <p>Not published yet.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="warning-block">
+      <span>{label}</span>
+      <ul>
+        {items.map((item) => (
+          <li key={`${label}-${item}`}>{item}</li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -76,6 +111,8 @@ function ReportsView() {
 
 function SettingsView() {
   const { state, actions } = useShell();
+  const providerState = describeProviderState(state.connectionStatus);
+  const runtimeState = describeRuntimeState(state.installStatus);
 
   return (
     <div className="thread-block">
@@ -105,16 +142,14 @@ function SettingsView() {
         <div className="detail-card">
           <span>Connection mode</span>
           <strong>{state.connectionMode}</strong>
-          <p>{state.connectionStatus?.warnings.join(", ") || "Primary OpenAI path with deterministic fallback."}</p>
+          <StatusBadge label={providerState.label} tone={providerState.tone} />
+          <p>{providerState.detail}</p>
         </div>
         <div className="detail-card">
           <span>Runtime readiness</span>
-          <strong>
-            {state.installStatus?.docker_ok && state.installStatus?.gmsh_ok && state.installStatus?.su2_image_ok
-              ? "Docker + gmsh + SU2 ready"
-              : "Runtime checks needed"}
-          </strong>
-          <p>{state.installStatus?.install_warnings.join(", ") || "No local runtime warnings reported."}</p>
+          <strong>{runtimeState.label}</strong>
+          <StatusBadge label={runtimeState.label} tone={runtimeState.tone} />
+          <p>{runtimeState.detail}</p>
         </div>
       </div>
     </div>
@@ -129,6 +164,16 @@ export function WorkspaceThread() {
   const sessionNotes = useMemo(() => selectSessionNotes(state), [state]);
   const canApprove = canApprovePreflight(state.draftPreflight);
   const selectedArtifact = getArtifactByKind(selectedJob, state.selectedArtifactKind);
+  const aiReviewState = describeAiReviewState(state.draftPreflight);
+  const jobAiReviewState = describeJobAiReviewState(selectedJob);
+  const normalizationRows = useMemo(
+    () => (state.draftPreflight ? summarizeNormalizationSummary(state.draftPreflight.normalization_summary) : []),
+    [state.draftPreflight],
+  );
+  const blockerRows = useMemo(
+    () => summarizeRuntimeBlockerDetails(state.draftPreflight),
+    [state.draftPreflight],
+  );
 
   if (state.routePane === "reports") {
     return <ReportsView />;
@@ -274,7 +319,7 @@ export function WorkspaceThread() {
           <div className="thread-card">
             <div className="thread-card__meta">
               <StatusBadge label={state.draftPreflight.execution_mode} tone={state.draftPreflight.execution_mode === "real" ? "good" : "warning"} />
-              <StatusBadge label={state.draftPreflight.ai_assist_mode} tone={state.draftPreflight.ai_assist_mode === "local_fallback" ? "warning" : "neutral"} />
+              <StatusBadge label={aiReviewState.label} tone={aiReviewState.tone} />
               <StatusBadge label={state.draftPreflight.mesh_strategy} />
             </div>
             <h3>{state.draftPreflight.selected_solver} selected</h3>
@@ -298,18 +343,41 @@ export function WorkspaceThread() {
               </div>
             </div>
             <div className="thread-card__warnings">
-              <label>
-                <span>Runtime blockers</span>
-                <textarea readOnly rows={Math.max(state.draftPreflight.runtime_blockers.length, 3)} value={state.draftPreflight.runtime_blockers.join("\n")} />
-              </label>
-              <label>
-                <span>Normalization summary</span>
-                <textarea readOnly rows={7} value={JSON.stringify(state.draftPreflight.normalization_summary, null, 2)} />
-              </label>
+              <WarningList label="Runtime blockers" items={state.draftPreflight.runtime_blockers} />
+              <WarningList label="AI warnings" items={state.draftPreflight.ai_warnings} />
+              <WarningList label="Policy warnings" items={state.draftPreflight.policy_warnings} />
+            </div>
+            {blockerRows.length > 0 ? (
+              <div className="summary-detail-grid">
+                {blockerRows.map((row) => (
+                  <div key={`${row.label}-${row.value}`} className="summary-detail-card">
+                    <span>{row.label}</span>
+                    <strong>{row.value}</strong>
+                  </div>
+                ))}
+              </div>
+            ) : null}
+            <div className="summary-detail-grid">
+              {normalizationRows.length > 0 ? (
+                normalizationRows.map((row) => (
+                  <div key={`${row.label}-${row.value}`} className="summary-detail-card">
+                    <span>{row.label}</span>
+                    <strong>{row.value}</strong>
+                  </div>
+                ))
+              ) : (
+                <div className="summary-detail-card summary-detail-card--muted">
+                  <span>Normalization summary</span>
+                  <strong>Not published yet</strong>
+                </div>
+              )}
             </div>
           </div>
         ) : (
-          <EmptyState title="No snapshot yet" body="Generate a preflight snapshot to review solver choice, blockers, hashes, and normalization details before creating a session." />
+          <EmptyState
+            title="No snapshot yet"
+            body="Generate a preflight snapshot to review solver choice, blockers, hashes, and normalization details before creating a session."
+          />
         )}
       </section>
 
@@ -342,7 +410,7 @@ export function WorkspaceThread() {
               <div className="thread-card__meta">
                 <StatusBadge label={selectedJob.status} tone={selectedJob.status === "completed" ? "good" : selectedJob.status === "failed" ? "danger" : "warning"} />
                 <StatusBadge label={selectedJob.execution_mode} tone={selectedJob.execution_mode === "real" ? "good" : "warning"} />
-                <StatusBadge label={selectedJob.ai_assist_mode} tone={selectedJob.ai_assist_mode === "local_fallback" ? "warning" : "neutral"} />
+                <StatusBadge label={jobAiReviewState.label} tone={jobAiReviewState.tone} />
               </div>
               <h3>Run timeline</h3>
               <div className="summary-grid">
@@ -369,16 +437,18 @@ export function WorkspaceThread() {
               {events.length === 0 ? (
                 <EmptyState title="No events yet" body="The worker timeline will stream here as the selected session runs." />
               ) : (
-                events.map((event) => (
-                  <article key={`${event.seq}-${event.id}`} className="event-row">
-                    <div className="event-row__meta">
-                      <span>{event.event_type}</span>
-                      <small>{formatTimestamp(event.created_at)}</small>
-                    </div>
-                    <strong>{typeof event.payload.message === "string" ? event.payload.message : event.event_type}</strong>
-                    <pre>{JSON.stringify(event.payload, null, 2)}</pre>
-                  </article>
-                ))
+                events.map((event) => {
+                  const summary = describeJobEvent(event);
+                  return (
+                    <article key={`${event.seq}-${event.id}`} className="event-row">
+                      <div className="event-row__meta">
+                        <span>{summary.label}</span>
+                        <small>{formatTimestamp(event.created_at)}</small>
+                      </div>
+                      <strong>{summary.detail}</strong>
+                    </article>
+                  );
+                })
               )}
             </div>
 
@@ -414,7 +484,7 @@ export function WorkspaceThread() {
                     ))}
                   </div>
                 ) : (
-                  <p>No residual history published yet.</p>
+                  <p>Residual history has not been published yet.</p>
                 )}
               </div>
               <ArtifactPanel

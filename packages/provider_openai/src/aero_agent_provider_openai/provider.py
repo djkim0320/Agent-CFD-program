@@ -18,11 +18,11 @@ class StructuredPreflightResult:
     ai_assist_mode: str
     ok: bool
     agent_type: str
-    payload: dict[str, Any]
+    payload: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     raw_text: str | None = None
     usage: dict[str, Any] = field(default_factory=dict)
-    fallback_reason: str | None = None
+    error_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -38,7 +38,7 @@ class OpenAIProviderAdapter:
             mode=ConnectionMode.OPENAI_API,
             backend=ProviderBackend.OPENAI,
             provider_ready=has_key,
-            warnings=[] if has_key else ["OpenAI API key not configured; structured preflight will use local fallback."],
+            warnings=[] if has_key else ["OpenAI API key not configured; AI review is unavailable."],
             details={"model": self.model, "api_base": self.api_base},
         )
 
@@ -51,7 +51,7 @@ class OpenAIProviderAdapter:
             supports_mcp=False,
             notes=[
                 "Structured JSON preflight helper is available.",
-                "Provider unavailability falls back to local deterministic output.",
+                "Provider unavailability is surfaced as explicit AI review unavailability.",
             ],
         )
 
@@ -68,7 +68,7 @@ class OpenAIProviderAdapter:
         timeout_s: float = 30.0,
     ) -> StructuredPreflightResult:
         if not self.healthcheck().provider_ready:
-            return self._fallback_result(agent_type, input_json, "OPENAI_API_KEY not configured.")
+            return self._unavailable_result(agent_type, "OPENAI_API_KEY not configured.")
 
         schema = self._schema_for(agent_type)
         system_prompt = prompt_pack or self._system_prompt_for(agent_type)
@@ -112,7 +112,7 @@ class OpenAIProviderAdapter:
             text = self._extract_text(raw)
             parsed = self._safe_json_loads(text) if text else None
             if not isinstance(parsed, dict):
-                return self._fallback_result(agent_type, input_json, "OpenAI response did not contain JSON.")
+                return self._failed_result(agent_type, "OpenAI response did not contain valid JSON.", raw_text=text)
             return StructuredPreflightResult(
                 provider="openai",
                 backend="openai",
@@ -125,27 +125,39 @@ class OpenAIProviderAdapter:
                 usage=self._usage_from_response(raw),
             )
         except Exception as exc:  # pragma: no cover - network/runtime guard
-            return self._fallback_result(agent_type, input_json, str(exc))
+            return self._failed_result(agent_type, str(exc))
 
-    def _fallback_result(
+    def _unavailable_result(
         self,
         agent_type: str,
-        input_json: dict[str, Any],
         reason: str,
     ) -> StructuredPreflightResult:
-        payload = self._normalize_payload(agent_type, input_json, self._deterministic_payload(agent_type, input_json))
-        payload["fallback_reason"] = reason
-        payload["ai_assist_mode"] = "local_fallback"
-        warnings = [f"OpenAI structured preflight unavailable: {reason}"]
         return StructuredPreflightResult(
             provider="openai",
-            backend="local_fallback",
-            ai_assist_mode="local_fallback",
+            backend="openai",
+            ai_assist_mode="unavailable",
             ok=False,
             agent_type=agent_type,
-            payload=payload,
-            warnings=warnings,
-            fallback_reason=reason,
+            warnings=[f"OpenAI structured preflight unavailable: {reason}"],
+            error_reason=reason,
+        )
+
+    def _failed_result(
+        self,
+        agent_type: str,
+        reason: str,
+        *,
+        raw_text: str | None = None,
+    ) -> StructuredPreflightResult:
+        return StructuredPreflightResult(
+            provider="openai",
+            backend="openai",
+            ai_assist_mode="failed",
+            ok=False,
+            agent_type=agent_type,
+            warnings=[f"OpenAI structured preflight failed: {reason}"],
+            raw_text=raw_text,
+            error_reason=reason,
         )
 
     def _schema_for(self, agent_type: str) -> dict[str, Any]:
@@ -201,34 +213,6 @@ class OpenAIProviderAdapter:
             return "Return solver planning JSON only."
         return "Return policy review JSON only."
 
-    def _deterministic_payload(self, agent_type: str, input_json: dict[str, Any]) -> dict[str, Any]:
-        input_digest = hashlib.sha256(
-            json.dumps(input_json, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
-        ).hexdigest()
-        if agent_type == "geometry-triage":
-            return {
-                "geometry_kind": input_json.get("geometry_kind_hint", "general_3d"),
-                "risks": ["Deterministic fallback used because OpenAI provider was unavailable."],
-                "missing_inputs": [],
-                "repairability": "repairable",
-                "notes": [f"input_digest={input_digest}"],
-            }
-        if agent_type == "solver-planner":
-            return {
-                "recommended_solver": input_json.get("solver_preference", "su2"),
-                "rationale": "Deterministic fallback solver planning.",
-                "execution_mode": "real",
-                "warnings": ["Provider unavailable; falling back to local deterministic preflight."],
-                "deferred_scope": ["OpenFOAM", "VSPAERO", "post-run agents"],
-            }
-        return {
-            "allowed": True,
-            "ai_warnings": ["Provider unavailable; using local deterministic policy review."],
-            "policy_warnings": ["Summary-only export recommended."],
-            "export_scope": "summary_only",
-            "notes": [f"input_digest={input_digest}"],
-        }
-
     def _normalize_payload(
         self,
         agent_type: str,
@@ -239,7 +223,6 @@ class OpenAIProviderAdapter:
         normalized.setdefault("agent_type", agent_type)
         normalized.setdefault("input_digest", self._input_digest(input_json))
         normalized.setdefault("provider", "openai")
-        normalized.setdefault("ai_assist_mode", "remote")
         return normalized
 
     def _usage_from_response(self, response_json: dict[str, Any]) -> dict[str, Any]:

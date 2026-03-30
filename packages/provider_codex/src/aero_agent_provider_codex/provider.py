@@ -26,10 +26,10 @@ class ReadonlyPreflightResult:
     ai_assist_mode: str
     ok: bool
     agent_type: str
-    payload: dict[str, Any]
+    payload: dict[str, Any] | None = None
     warnings: list[str] = field(default_factory=list)
     raw_text: str | None = None
-    fallback_reason: str | None = None
+    error_reason: str | None = None
 
 
 @dataclass(slots=True)
@@ -38,9 +38,9 @@ class CodexProviderAdapter:
     Backend precedence:
     1. SDK
     2. app-server experimental
-    3. noninteractive fallback
-    4. MCP fallback
-    5. mock fallback
+    3. noninteractive detection
+    4. MCP detection
+    5. mock/unavailable
     """
 
     backend_choice: CodexBackendChoice | None = None
@@ -62,11 +62,12 @@ class CodexProviderAdapter:
     def healthcheck(self) -> ProviderStatus:
         backend = self.detect_backend()
         wsl_preferred = True
+        provider_ready = False
         return ProviderStatus(
             connected=backend != CodexBackendChoice.MOCK,
             mode=ConnectionMode.CODEX_OAUTH,
             backend=self._to_contract_backend(backend),
-            provider_ready=backend != CodexBackendChoice.MOCK,
+            provider_ready=provider_ready,
             warnings=self._warnings(backend),
             details={"backend_choice": backend.value, "wsl_preferred": wsl_preferred},
         )
@@ -81,9 +82,8 @@ class CodexProviderAdapter:
             supports_mcp=True,
             notes=[
                 "Read-only preflight bridge only.",
-                "SDK is the default backend.",
-                "app-server is experimental.",
-                "noninteractive and MCP are fallback routes.",
+                "This build does not expose a production Codex advisory bridge.",
+                "Windows codex_oauth remains beta and WSL-preferred by product policy.",
             ],
         )
 
@@ -99,18 +99,9 @@ class CodexProviderAdapter:
     ) -> ReadonlyPreflightResult:
         backend = self.detect_backend()
         if backend == CodexBackendChoice.MOCK:
-            return self._fallback_result(agent_type, input_json, "No Codex runtime detected.")
+            return self._unavailable_result(agent_type, "No Codex runtime detected.")
 
-        payload = self._bridge_payload(agent_type, input_json, prompt_pack=prompt_pack, backend=backend)
-        return ReadonlyPreflightResult(
-            provider="codex",
-            backend=backend.value,
-            ai_assist_mode="remote",
-            ok=True,
-            agent_type=agent_type,
-            payload=payload,
-            warnings=self._warnings(backend),
-        )
+        return self._disabled_result(agent_type, backend)
 
     def _to_contract_backend(self, backend: CodexBackendChoice) -> ProviderBackend:
         mapping = {
@@ -127,91 +118,41 @@ class CodexProviderAdapter:
         if backend == CodexBackendChoice.APP_SERVER:
             warnings.append("Codex app-server backend is experimental.")
         if backend == CodexBackendChoice.NONINTERACTIVE:
-            warnings.append("Using codex exec noninteractive fallback backend.")
+            warnings.append("Codex noninteractive backend is detected, but the read-only bridge is disabled.")
         if backend == CodexBackendChoice.MCP:
-            warnings.append("Using Codex MCP fallback backend.")
+            warnings.append("Codex MCP backend is detected, but the read-only bridge is disabled.")
         if backend == CodexBackendChoice.MOCK:
-            warnings.append("No Codex runtime detected; using mock backend.")
+            warnings.append("No Codex runtime detected; AI review is unavailable.")
         return warnings
 
-    def _fallback_result(
+    def _unavailable_result(
         self,
         agent_type: str,
-        input_json: dict[str, Any],
         reason: str,
     ) -> ReadonlyPreflightResult:
-        payload = self._bridge_payload(agent_type, input_json, backend=CodexBackendChoice.MOCK)
-        payload["fallback_reason"] = reason
         return ReadonlyPreflightResult(
             provider="codex",
             backend="mock",
-            ai_assist_mode="local_fallback",
+            ai_assist_mode="unavailable",
             ok=False,
             agent_type=agent_type,
-            payload=payload,
             warnings=[f"Codex read-only bridge unavailable: {reason}"],
-            fallback_reason=reason,
+            error_reason=reason,
         )
 
-    def _bridge_payload(
+    def _disabled_result(
         self,
         agent_type: str,
-        input_json: dict[str, Any],
         *,
         backend: CodexBackendChoice,
-        prompt_pack: str | None = None,
-    ) -> dict[str, Any]:
-        input_digest = hashlib.sha256(
-            str(sorted((key, self._canonicalize(value)) for key, value in input_json.items())).encode("utf-8")
-        ).hexdigest()
-        payload = self._deterministic_payload(agent_type, input_json)
-        payload.update(
-            {
-                "provider": "codex",
-                "backend": backend.value,
-                "bridge_mode": "read_only_preflight",
-                "ai_assist_mode": "remote" if backend != CodexBackendChoice.MOCK else "local_fallback",
-                "input_digest": input_digest,
-                "input_keys": sorted(input_json.keys()),
-                "prompt_pack": prompt_pack,
-                "beta_note": "Windows codex_oauth support is Beta and WSL-preferred.",
-            }
+    ) -> ReadonlyPreflightResult:
+        reason = "Codex read-only advisory is disabled in this production build."
+        return ReadonlyPreflightResult(
+            provider="codex",
+            backend=backend.value,
+            ai_assist_mode="disabled",
+            ok=False,
+            agent_type=agent_type,
+            warnings=self._warnings(backend) + [reason],
+            error_reason=reason,
         )
-        return payload
-
-    def _deterministic_payload(self, agent_type: str, input_json: dict[str, Any]) -> dict[str, Any]:
-        digest = hashlib.sha256(
-            repr(sorted((key, self._canonicalize(value)) for key, value in input_json.items())).encode("utf-8")
-        ).hexdigest()
-        if agent_type == "geometry-triage":
-            return {
-                "geometry_kind": input_json.get("geometry_kind_hint", "general_3d"),
-                "risks": [
-                    "Codex bridge is read-only; geometry summary is derived from local manifest.",
-                ],
-                "missing_inputs": [],
-                "repairability": "repairable",
-                "notes": [f"input_digest={digest}"],
-            }
-        if agent_type == "solver-planner":
-            return {
-                "recommended_solver": input_json.get("solver_preference", "su2"),
-                "rationale": "Codex bridge returned a read-only solver plan.",
-                "execution_mode": "real",
-                "warnings": ["Provider-only signal; runtime readiness still governs execution."],
-                "deferred_scope": ["OpenFOAM", ".vsp3", "post-run agents"],
-            }
-        return {
-            "allowed": True,
-            "ai_warnings": ["Codex bridge is read-only and advisory only."],
-            "policy_warnings": ["Summary-only export recommended."],
-            "export_scope": "summary_only",
-            "notes": [f"input_digest={digest}"],
-        }
-
-    def _canonicalize(self, value: Any) -> Any:
-        if isinstance(value, dict):
-            return {key: self._canonicalize(value[key]) for key in sorted(value)}
-        if isinstance(value, list):
-            return [self._canonicalize(item) for item in value]
-        return value

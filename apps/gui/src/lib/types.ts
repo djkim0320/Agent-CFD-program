@@ -33,3 +33,36 @@ export interface AnalysisFormState {
   solverPreference: "auto" | "vspaero" | "su2" | "openfoam";
   notes: string;
 }
+
+export type DiagnosticScope = "global" | "provider" | "decode" | "stream" | "runtime" | "preflight" | "artifact";
+
+export type DiagnosticSeverity = "info" | "warning" | "error";
+
+export type StreamHealthState = "idle" | "connecting" | "open" | "disconnected" | "failed";
+
+export interface StreamHealth {
+  state: StreamHealthState;
+  lastEventAt: string | null;
+  lastError: string | null;
+  eventCount: number;
+}
+
+export interface DiagnosticIssue {
+  id: string;
+  scope: DiagnosticScope;
+  subjectId: string | null;
+  code: string;
+  title: string;
+  detail: string;
+  severity: DiagnosticSeverity;
+  impact: string | null;
+  nextAction: string | null;
+  raw: unknown;
+  createdAt: string;
+}
+
+export type UiAiReviewState = "ready" | "unavailable" | "disabled" | "failed";
+
+export type UiRuntimeState = "ready" | "blocked";
+
+export type UiProviderState = "ready" | "unavailable";

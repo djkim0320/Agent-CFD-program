@@ -28,6 +28,7 @@ from aero_agent_contracts import (
     JobRecord,
     JobStatus,
     JobSummaryResponse,
+    IssueRecord,
     PreflightResponse,
     PreflightSnapshot,
     ProviderBackend,
@@ -198,7 +199,7 @@ async def create_preflight(
         connection_mode=connection.mode,
     )
     provider_status = build_connection_status_response(connection.id, connection.mode)
-    subagent_findings, ai_assist_mode, ai_warnings, policy_warnings = run_preflight_subagents(
+    subagent_findings, ai_assist_mode, ai_review_reason, ai_warnings, policy_warnings = run_preflight_subagents(
         connection.mode,
         provider_status,
         bundle,
@@ -266,6 +267,7 @@ async def create_preflight(
         encoding="utf-8",
     )
     normalized_manifest_hash = get_cfd_core().compute_sha256(normalized_manifest_path)
+    runtime_blocker_details = build_runtime_blocker_details(bundle.runtime_blockers)
 
     plan_path = preflight_dir / "plan.json"
     plan_path.write_text(
@@ -273,7 +275,10 @@ async def create_preflight(
         encoding="utf-8",
     )
     findings_path = preflight_dir / "subagent_findings.json"
-    findings_path.write_text(subagent_findings.model_dump_json(indent=2), encoding="utf-8")
+    findings_path.write_text(
+        subagent_findings.model_dump_json(indent=2) if subagent_findings is not None else "null\n",
+        encoding="utf-8",
+    )
     integrity_path = preflight_dir / "integrity.json"
     integrity_path.write_text(
         json.dumps(
@@ -321,6 +326,8 @@ async def create_preflight(
         snapshot_id=preflight_id,
         subagent_findings=subagent_findings,
         ai_assist_mode=ai_assist_mode,
+        ai_review_status=ai_assist_mode,
+        ai_review_reason=ai_review_reason,
         ai_warnings=ai_warnings,
         policy_warnings=policy_warnings,
         request_digest=request_digest,
@@ -328,6 +335,7 @@ async def create_preflight(
         normalized_manifest_hash=normalized_manifest_hash,
         normalized_geometry_hash=normalized_geometry_hash,
         normalization_summary=normalization_summary,
+        runtime_blocker_details=[detail.model_dump(mode="json") for detail in runtime_blocker_details],
     )
 
 
@@ -451,7 +459,7 @@ def run_preflight_subagents(
     connection_mode: ConnectionMode,
     provider_status: ConnectionStatusResponse,
     bundle,
-) -> tuple[SubagentFindings, AIAssistMode, list[str], list[str]]:
+) -> tuple[SubagentFindings | None, AIAssistMode, str | None, list[str], list[str]]:
     payloads = get_cfd_core().build_subagent_payloads(
         bundle,
         provider_connected=provider_status.connected,
@@ -461,39 +469,43 @@ def run_preflight_subagents(
 
     warnings: list[str] = list(provider_status.warnings)
     ai_mode = AIAssistMode.DISABLED
+    ai_review_reason: str | None = None
 
     if connection_mode == ConnectionMode.OPENAI_API:
         adapter = get_openai_provider()
-        geometry = adapter.run_structured_preflight("geometry-triage", payloads["geometry-triage"])
-        solver = adapter.run_structured_preflight("solver-planner", payloads["solver-planner"])
-        policy = adapter.run_structured_preflight("auth-and-policy-reviewer", payloads["auth-and-policy-reviewer"])
-        ai_mode = AIAssistMode(geometry.ai_assist_mode)
-        warnings.extend(geometry.warnings)
-        warnings.extend(solver.warnings)
-        warnings.extend(policy.warnings)
-        findings = SubagentFindings(
-            geometry_triage=GeometryTriageFinding.model_validate(geometry.payload),
-            solver_planner=SolverPlannerFinding.model_validate(solver.payload),
-            auth_and_policy_reviewer=AuthPolicyFinding.model_validate(policy.payload),
-        )
+        results = [
+            adapter.run_structured_preflight("geometry-triage", payloads["geometry-triage"]),
+            adapter.run_structured_preflight("solver-planner", payloads["solver-planner"]),
+            adapter.run_structured_preflight("auth-and-policy-reviewer", payloads["auth-and-policy-reviewer"]),
+        ]
     else:
         adapter = get_codex_provider()
-        geometry = adapter.run_readonly_preflight("geometry-triage", payloads["geometry-triage"])
-        solver = adapter.run_readonly_preflight("solver-planner", payloads["solver-planner"])
-        policy = adapter.run_readonly_preflight("auth-and-policy-reviewer", payloads["auth-and-policy-reviewer"])
-        ai_mode = AIAssistMode(geometry.ai_assist_mode)
-        warnings.extend(geometry.warnings)
-        warnings.extend(solver.warnings)
-        warnings.extend(policy.warnings)
+        results = [
+            adapter.run_readonly_preflight("geometry-triage", payloads["geometry-triage"]),
+            adapter.run_readonly_preflight("solver-planner", payloads["solver-planner"]),
+            adapter.run_readonly_preflight("auth-and-policy-reviewer", payloads["auth-and-policy-reviewer"]),
+        ]
+
+    for result in results:
+        warnings.extend(result.warnings)
+
+    ai_mode = derive_ai_review_status(results)
+    ai_review_reason = next((result.error_reason for result in results if result.error_reason), None)
+
+    if all(result.ok and result.payload is not None for result in results):
+        geometry, solver, policy = results
         findings = SubagentFindings(
             geometry_triage=GeometryTriageFinding.model_validate(geometry.payload),
             solver_planner=SolverPlannerFinding.model_validate(solver.payload),
             auth_and_policy_reviewer=AuthPolicyFinding.model_validate(policy.payload),
         )
-
-    ai_warnings = unique_strings(warnings + findings.auth_and_policy_reviewer.ai_warnings)
-    policy_warnings = unique_strings(findings.auth_and_policy_reviewer.policy_warnings + provider_status.warnings)
-    return findings, ai_mode, ai_warnings, policy_warnings
+        ai_warnings = unique_strings(warnings + findings.auth_and_policy_reviewer.ai_warnings)
+        policy_warnings = unique_strings(findings.auth_and_policy_reviewer.policy_warnings + provider_status.warnings)
+    else:
+        findings = None
+        ai_warnings = unique_strings(warnings)
+        policy_warnings = unique_strings(provider_status.warnings)
+    return findings, ai_mode, ai_review_reason, ai_warnings, policy_warnings
 
 
 def build_connection_status_response(connection_id: str, mode: ConnectionMode) -> ConnectionStatusResponse:
@@ -608,6 +620,8 @@ def to_job_summary(job: JobRecord) -> JobSummaryResponse:
         selected_solver=job.selected_solver,
         execution_mode=job.execution_mode,
         ai_assist_mode=job.ai_assist_mode,
+        ai_review_status=job.ai_assist_mode,
+        ai_review_reason=derive_ai_review_reason(job.ai_assist_mode, job.ai_warnings),
         source_file_name=job.source_file_name,
         created_at=job.created_at,
         updated_at=job.updated_at,
@@ -624,6 +638,87 @@ def to_job_summary(job: JobRecord) -> JobSummaryResponse:
         error=job.error,
         preflight_snapshot_id=job.preflight_snapshot_id,
     )
+
+
+def derive_ai_review_status(results: list[Any]) -> AIAssistMode:
+    modes = [AIAssistMode(result.ai_assist_mode) for result in results]
+    if any(mode == AIAssistMode.FAILED for mode in modes):
+        return AIAssistMode.FAILED
+    if any(mode == AIAssistMode.UNAVAILABLE for mode in modes):
+        return AIAssistMode.UNAVAILABLE
+    if any(mode == AIAssistMode.DISABLED for mode in modes):
+        return AIAssistMode.DISABLED
+    return AIAssistMode.REMOTE
+
+
+def derive_ai_review_reason(ai_mode: AIAssistMode, ai_warnings: list[str]) -> str | None:
+    if ai_mode == AIAssistMode.REMOTE:
+        return None
+    return ai_warnings[0] if ai_warnings else None
+
+
+def build_runtime_blocker_details(blockers: list[str]) -> list[IssueRecord]:
+    details: list[IssueRecord] = []
+    for blocker in blockers:
+        normalized = blocker.lower()
+        if "step tessellation failed" in normalized or "step tessellation did not produce a usable surface mesh" in normalized:
+            details.append(
+                IssueRecord(
+                    code="STEP_TESSELLATION_FAILED",
+                    message=blocker,
+                    guidance="Convert the geometry to STL or OBJ, or fix the STEP tessellation path before retrying.",
+                )
+            )
+            continue
+        if "geometry normalization failed" in normalized and (
+            "step" in normalized or "triangulated surface mesh" in normalized
+        ):
+            details.append(
+                IssueRecord(
+                    code="STEP_NORMALIZATION_UNSUPPORTED",
+                    message=blocker,
+                    guidance="Use STL/OBJ for the current happy path, or repair the STEP source so normalization can complete.",
+                )
+            )
+            continue
+        if "not watertight" in normalized:
+            details.append(
+                IssueRecord(
+                    code="GEOMETRY_NOT_WATERTIGHT",
+                    message=blocker,
+                    guidance="Repair or export a watertight surface mesh before generating a new preflight snapshot.",
+                )
+            )
+            continue
+        if "docker not detected" in normalized:
+            details.append(
+                IssueRecord(
+                    code="DOCKER_NOT_DETECTED",
+                    message=blocker,
+                    guidance="Install or start Docker Desktop, then rerun install checks.",
+                )
+            )
+            continue
+        if "gmsh not detected" in normalized:
+            details.append(
+                IssueRecord(
+                    code="GMSH_NOT_DETECTED",
+                    message=blocker,
+                    guidance="Install gmsh or set AERO_AGENT_GMSH_PATH before retrying.",
+                )
+            )
+            continue
+        if "pinned su2 docker image not detected" in normalized:
+            details.append(
+                IssueRecord(
+                    code="SU2_IMAGE_NOT_DETECTED",
+                    message=blocker,
+                    guidance="Pull or build the pinned SU2 image, then rerun install checks.",
+                )
+            )
+            continue
+        details.append(IssueRecord(code="RUNTIME_BLOCKED", message=blocker))
+    return details
 
 
 def load_residual_history(path: Path) -> list[dict[str, float]]:

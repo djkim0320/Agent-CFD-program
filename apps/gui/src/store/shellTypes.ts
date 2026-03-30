@@ -3,14 +3,16 @@ import type {
   AIAssistMode,
   ConnectionMode,
   ConnectionStatusResponse,
+  DiagnosticIssue,
   InstallStatusResponse,
   JobEventRecord,
   JobSummaryResponse,
   PreflightResponse,
+  StreamHealth,
 } from "../lib/types";
 
 export type RoutePane = "workspace" | "reports" | "settings";
-export type InspectorTab = "snapshot" | "run" | "artifacts" | "environment";
+export type InspectorTab = "snapshot" | "run" | "artifacts" | "environment" | "diagnostics";
 export type ComposerScope = "draft" | "job";
 
 export interface ComposerNote {
@@ -36,6 +38,8 @@ export interface ShellState {
   jobOrder: string[];
   eventsByJobId: Record<string, JobEventRecord[]>;
   notesByScope: Record<string, ComposerNote[]>;
+  diagnosticIssues: DiagnosticIssue[];
+  streamHealthByJobId: Record<string, StreamHealth>;
   selectedJobId: string | null;
   selectedInspectorTab: InspectorTab;
   selectedArtifactKind: string | null;
@@ -60,6 +64,9 @@ export type ShellAction =
   | { type: "append-event"; jobId: string; event: JobEventRecord }
   | { type: "set-events"; jobId: string; events: JobEventRecord[] }
   | { type: "append-note"; scope: ComposerScope; text: string; createdAt: string }
+  | { type: "append-diagnostic-issue"; issue: DiagnosticIssue }
+  | { type: "clear-diagnostics" }
+  | { type: "set-stream-health"; jobId: string; state: StreamHealth["state"]; patch?: Partial<StreamHealth> }
   | { type: "set-selected-inspector-tab"; tab: InspectorTab }
   | { type: "set-selected-artifact-kind"; kind: string | null }
   | { type: "set-composer-text"; text: string }
@@ -99,6 +106,8 @@ export function createInitialShellState(): ShellState {
     jobOrder: [],
     eventsByJobId: {},
     notesByScope: {},
+    diagnosticIssues: [],
+    streamHealthByJobId: {},
     selectedJobId: null,
     selectedInspectorTab: "snapshot",
     selectedArtifactKind: null,
@@ -111,4 +120,3 @@ export function createInitialShellState(): ShellState {
 export function currentScopeKey(selectedJobId: string | null): ComposerScope | string {
   return selectedJobId ?? "draft";
 }
-

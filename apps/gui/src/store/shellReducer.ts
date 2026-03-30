@@ -1,5 +1,6 @@
 import type { JobSummaryResponse } from "../lib/types";
 import type { SessionRecord, ShellAction, ShellState } from "./shellTypes";
+import { createIdleStreamHealth, updateStreamHealth } from "./diagnostics";
 
 export function createInitialDraft(): ShellState["draft"] {
   return {
@@ -34,6 +35,8 @@ export function createInitialShellState(): ShellState {
     jobOrder: [],
     eventsByJobId: {},
     notesByScope: {},
+    diagnosticIssues: [],
+    streamHealthByJobId: {},
     selectedJobId: null,
     selectedInspectorTab: "snapshot",
     selectedArtifactKind: null,
@@ -177,6 +180,23 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         },
       };
     }
+    case "append-diagnostic-issue":
+      return {
+        ...state,
+        diagnosticIssues: state.diagnosticIssues.some((issue) => issue.id === action.issue.id)
+          ? state.diagnosticIssues
+          : [...state.diagnosticIssues, action.issue],
+      };
+    case "clear-diagnostics":
+      return { ...state, diagnosticIssues: [] };
+    case "set-stream-health":
+      return {
+        ...state,
+        streamHealthByJobId: {
+          ...state.streamHealthByJobId,
+          [action.jobId]: updateStreamHealth(state.streamHealthByJobId[action.jobId] ?? createIdleStreamHealth(), action.state, action.patch),
+        },
+      };
     case "set-selected-inspector-tab":
       return { ...state, selectedInspectorTab: action.tab };
     case "set-selected-artifact-kind":

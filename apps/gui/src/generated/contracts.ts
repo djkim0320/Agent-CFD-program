@@ -6,7 +6,7 @@ export type GeometryKind = "general_3d" | "aircraft_vsp";
 
 export type ExecutionMode = "real" | "scaffold";
 
-export type AIAssistMode = "remote" | "local_fallback" | "disabled";
+export type AIAssistMode = "remote" | "unavailable" | "disabled" | "failed";
 
 export type JobStatus =
   | "uploaded"
@@ -84,21 +84,30 @@ export interface SubagentFindings {
   auth_and_policy_reviewer: AuthAndPolicyFinding;
 }
 
+export interface IssueRecord {
+  code: string;
+  message: string;
+  guidance?: string | null;
+}
+
 export interface PreflightResponse {
   preflight_id: string;
   selected_solver: SolverKind;
   execution_mode: ExecutionMode;
   ai_assist_mode: AIAssistMode;
+  ai_review_status?: AIAssistMode | null;
+  ai_review_reason?: string | null;
   runtime_blockers: string[];
+  runtime_blocker_details: IssueRecord[];
   install_warnings: string[];
   ai_warnings: string[];
   policy_warnings: string[];
-  subagent_findings: SubagentFindings;
+  subagent_findings?: SubagentFindings | null;
   request_digest: string;
   source_hash: string;
   normalized_manifest_hash: string;
-  normalized_geometry_hash: string;
-  normalization_summary: Record<string, unknown>;
+  normalized_geometry_hash?: string | null;
+  normalization_summary?: Record<string, unknown> | null;
   physics_grade: "stable_trend_grade";
   mesh_strategy: "box_farfield";
   runtime_estimate_minutes: number;
@@ -130,11 +139,13 @@ export interface JobSummaryResponse {
   selected_solver: SolverKind;
   execution_mode: ExecutionMode;
   ai_assist_mode: AIAssistMode;
+  ai_review_status?: AIAssistMode | null;
+  ai_review_reason?: string | null;
   source_file_name: string;
   created_at: string;
   updated_at: string;
   preflight_snapshot_id: string;
-  rationale: string;
+  rationale?: string | null;
   progress: number;
   runtime_blockers: string[];
   install_warnings: string[];
@@ -147,7 +158,7 @@ export interface JobSummaryResponse {
 }
 
 export interface JobEventRecord {
-  id: string;
+  id?: number | null;
   job_id: string;
   seq: number;
   event_type: JobEventType;

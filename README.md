@@ -23,6 +23,9 @@ Independent local-first aerodynamic analysis agent for a Windows desktop workflo
 - Snapshot consumption is claimed at approval time, not by the worker.
 - Job summaries expose source file name and timestamps for sidebar/session rows.
 - STEP normalization failures are intended to surface as blocker-style preflight responses when the backend path supports it.
+- AI advisory failures should surface as explicit unavailable/failed states; production UI paths should not treat provider fallback payloads as successful AI review.
+- Frontend contract decoding is expected to stay strict: missing required fields should fail fast rather than being defaulted into `real` / `su2` / `remote`.
+- Any provider fallback retained for local development must be explicit and opt-in, not a silent production behavior.
 
 ## Structure
 

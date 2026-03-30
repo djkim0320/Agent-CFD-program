@@ -1,6 +1,6 @@
 import { useMemo } from "react";
 import { useShell } from "../../store/ShellProvider";
-import { formatTimestamp, getOverallState, getSidebarSessions } from "../../store/selectors";
+import { describeProviderState, describeRuntimeState, formatTimestamp, getOverallState, getSidebarSessions } from "../../store/selectors";
 import { StatusBadge } from "../common/StatusBadge";
 
 function toneForSessionStatus(status: string): "neutral" | "good" | "warning" | "danger" {
@@ -14,6 +14,8 @@ export function Sidebar() {
   const { state, actions } = useShell();
   const sessions = useMemo(() => getSidebarSessions(state), [state]);
   const draftState = getOverallState(state.draftPreflight);
+  const providerState = describeProviderState(state.connectionStatus);
+  const runtimeState = describeRuntimeState(state.installStatus);
 
   return (
     <aside className="shell-sidebar">
@@ -50,7 +52,7 @@ export function Sidebar() {
         <p>
           {state.draftPreflight
             ? `${state.draftPreflight.selected_solver} / ${state.draftPreflight.execution_mode}`
-            : "Draft stays local until a preflight snapshot is generated."}
+            : "Draft remains provisional until a preflight snapshot is generated."}
         </p>
       </section>
 
@@ -91,10 +93,12 @@ export function Sidebar() {
         </div>
         <div className="sidebar-kv">
           <span>Provider</span>
-          <strong>{state.connectionStatus?.provider_ready ? "Ready" : "Fallback"}</strong>
+          <strong>{providerState.label}</strong>
           <span>Runtime</span>
-          <strong>{state.installStatus?.docker_ok && state.installStatus?.gmsh_ok && state.installStatus?.su2_image_ok ? "Ready" : "Check setup"}</strong>
+          <strong>{runtimeState.label}</strong>
         </div>
+        <p>{providerState.detail}</p>
+        <p>{runtimeState.detail}</p>
       </section>
     </aside>
   );

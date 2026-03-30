@@ -62,8 +62,9 @@ class ExecutionMode(StrEnum):
 
 class AIAssistMode(StrEnum):
     REMOTE = "remote"
-    LOCAL_FALLBACK = "local_fallback"
+    UNAVAILABLE = "unavailable"
     DISABLED = "disabled"
+    FAILED = "failed"
 
 
 class EventType(StrEnum):
@@ -241,6 +242,12 @@ class SubagentFindings(BaseModel):
     auth_and_policy_reviewer: AuthPolicyFinding
 
 
+class IssueRecord(BaseModel):
+    code: str
+    message: str
+    guidance: str | None = None
+
+
 class NormalizationSummary(BaseModel):
     source_format: str | None = None
     declared_unit: str
@@ -381,6 +388,8 @@ class JobSummaryResponse(BaseModel):
     selected_solver: SolverKind
     execution_mode: ExecutionMode
     ai_assist_mode: AIAssistMode
+    ai_review_status: AIAssistMode | None = None
+    ai_review_reason: str | None = None
     source_file_name: str
     created_at: datetime
     updated_at: datetime
@@ -441,11 +450,14 @@ class PreflightResponse(BaseModel):
     selected_solver: SolverKind
     execution_mode: ExecutionMode
     ai_assist_mode: AIAssistMode
+    ai_review_status: AIAssistMode | None = None
+    ai_review_reason: str | None = None
     runtime_blockers: list[str] = Field(default_factory=list)
+    runtime_blocker_details: list[IssueRecord] = Field(default_factory=list)
     install_warnings: list[str] = Field(default_factory=list)
     ai_warnings: list[str] = Field(default_factory=list)
     policy_warnings: list[str] = Field(default_factory=list)
-    subagent_findings: SubagentFindings
+    subagent_findings: SubagentFindings | None = None
     request_digest: str
     source_hash: str
     normalized_manifest_hash: str

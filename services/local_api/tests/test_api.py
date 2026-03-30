@@ -132,6 +132,8 @@ def reset_app(tmp_path: Path, monkeypatch):
         snapshot_id: str,
         subagent_findings,
         ai_assist_mode,
+        ai_review_status,
+        ai_review_reason,
         ai_warnings,
         policy_warnings,
         request_digest: str,
@@ -139,6 +141,7 @@ def reset_app(tmp_path: Path, monkeypatch):
         normalized_manifest_hash: str,
         normalized_geometry_hash: str = "",
         normalization_summary: dict | None = None,
+        runtime_blocker_details: list[dict] | None = None,
     ):
         frame = bundle.request.frame
         return CompatiblePreflightResponse(
@@ -146,7 +149,10 @@ def reset_app(tmp_path: Path, monkeypatch):
             selected_solver=bundle.solver_selection.selected_solver,
             execution_mode=bundle.execution_mode,
             ai_assist_mode=ai_assist_mode,
+            ai_review_status=ai_review_status,
+            ai_review_reason=ai_review_reason,
             runtime_blockers=list(bundle.runtime_blockers),
+            runtime_blocker_details=runtime_blocker_details or [],
             install_warnings=list(bundle.install_warnings),
             ai_warnings=list(ai_warnings),
             policy_warnings=list(policy_warnings),
@@ -433,7 +439,7 @@ def test_connection_status_route(tmp_path, monkeypatch) -> None:
         assert response.json()["mode"] == "codex_oauth"
 
 
-def test_preflight_provider_fallback_does_not_block_real_run(tmp_path, monkeypatch) -> None:
+def test_provider_unavailable_is_explicit_and_does_not_look_like_success(tmp_path, monkeypatch) -> None:
     app, deps = reset_app(tmp_path, monkeypatch)
     patch_runtime_ready(deps, monkeypatch)
     with TestClient(app) as client:
@@ -445,9 +451,13 @@ def test_preflight_provider_fallback_does_not_block_real_run(tmp_path, monkeypat
         assert response.status_code == 200
         payload = response.json()
         assert payload["execution_mode"] == "real"
-        assert payload["ai_assist_mode"] == "local_fallback"
         assert payload["runtime_blockers"] == []
         assert payload["preflight_id"]
+        ai_review_status = payload.get("ai_review_status")
+        assert ai_review_status is not None
+        assert ai_review_status in {"unavailable", "failed"}
+        assert payload["ai_assist_mode"] in {"unavailable", "failed"}
+        assert payload.get("subagent_findings") is None
 
 
 def test_blank_optional_form_values_are_normalized(tmp_path, monkeypatch) -> None:
@@ -503,11 +513,14 @@ def test_step_success_and_failure_branches(tmp_path, monkeypatch) -> None:
             data=preflight_payload(),
             files={"geometry_file": ("sample.step", b"ISO-10303-21;", "application/step")},
         )
-        if failure.status_code == 500:
-            pytest.xfail("Known backend gap: STEP normalization failures still surface as 500 instead of a blocker response.")
         assert failure.status_code == 200
         assert failure.json()["execution_mode"] == "scaffold"
-        assert failure.json()["runtime_blockers"]
+        payload = failure.json()
+        assert payload["runtime_blockers"]
+        blocker_details = payload.get("runtime_blocker_details")
+        assert isinstance(blocker_details, list)
+        blocker_codes = [item["code"] for item in blocker_details if isinstance(item, dict) and isinstance(item.get("code"), str)]
+        assert any(code in {"STEP_TESSELLATION_FAILED", "STEP_NORMALIZATION_UNSUPPORTED"} for code in blocker_codes)
 
     monkeypatch.setattr(core, "_load_step_via_gmsh", lambda _path: core._load_stl(Path(tmp_path / "dummy.stl")))
     (tmp_path / "dummy.stl").write_bytes(tetra_stl())
