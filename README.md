@@ -1,14 +1,28 @@
 # Aero Agent Workspace
 
-Independent local-first aerodynamic analysis agent scaffold for a Windows-installed, browser-based desktop workflow.
+Independent local-first aerodynamic analysis agent for a Windows desktop workflow.
 
-## Current vertical slice
+## Current workflow
 
-- Upload `STEP/STL/OBJ/.vsp3` geometry through the GUI scaffold
-- Generate a preflight solver plan
-- Require manual approval before mutable execution
-- Run a deterministic mock CFD pipeline to completion
-- Publish SSE job events, a HTML report placeholder, and viewer assets
+- Upload geometry in the GUI shell
+- Create a snapshot-backed preflight plan
+- Require manual approval before execution
+- Run approved jobs through the local worker, CFD core, solver adapters, and Docker SU2
+- Publish SSE job events, a report, and artifacts back to the shell
+
+## UI direction
+
+- The GUI is being reorganized into a desktop-first app shell and conversational workbench.
+- The target shape is sidebar + thread workspace + composer + inspector, not a card dashboard.
+- The current backend single-path flow stays in place while the shell is refactored.
+
+## Backend lifecycle notes
+
+- Optional blank form fields are normalized server-side before preflight parsing.
+- `create_job` is idempotent per preflight snapshot and returns an existing draft when present.
+- Snapshot consumption is claimed at approval time, not by the worker.
+- Job summaries expose source file name and timestamps for sidebar/session rows.
+- STEP normalization failures are intended to surface as blocker-style preflight responses when the backend path supports it.
 
 ## Structure
 

@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Literal
 
-from fastapi import Form
+from fastapi import Form, HTTPException
 from pydantic import BaseModel
 
 from aero_agent_contracts import (
@@ -73,22 +73,22 @@ class PreflightMultipartForm(BaseModel):
         fidelity: Literal["fast", "balanced", "high"] = Form("balanced"),
         frame_forward_axis: Literal["x", "y", "z"] = Form("x"),
         frame_up_axis: Literal["x", "y", "z"] = Form("z"),
-        frame_symmetry_plane: Literal["xy", "yz", "xz"] | None = Form(None),
+        frame_symmetry_plane: str | None = Form(None),
         frame_moment_center: str | None = Form(None),
         reference_area: float = Form(...),
-        reference_length: float | None = Form(None),
-        reference_span: float | None = Form(None),
-        flow_velocity: float | None = Form(None),
-        flow_mach: float | None = Form(None),
+        reference_length: str | None = Form(None),
+        reference_span: str | None = Form(None),
+        flow_velocity: str | None = Form(None),
+        flow_mach: str | None = Form(None),
         flow_aoa: float = Form(0.0),
         flow_sideslip: float = Form(0.0),
-        flow_altitude: float | None = Form(None),
-        flow_density: float | None = Form(None),
-        flow_viscosity: float | None = Form(None),
+        flow_altitude: str | None = Form(None),
+        flow_density: str | None = Form(None),
+        flow_viscosity: str | None = Form(None),
         notes: str | None = Form(None),
     ) -> "PreflightMultipartForm":
         return cls(
-            connection_id=connection_id,
+            connection_id=_blank_to_none(connection_id),
             connection_mode=connection_mode,
             unit=unit,
             geometry_kind=geometry_kind,
@@ -96,19 +96,19 @@ class PreflightMultipartForm(BaseModel):
             fidelity=fidelity,
             forward_axis=frame_forward_axis,
             up_axis=frame_up_axis,
-            symmetry_plane=frame_symmetry_plane,
-            moment_center=frame_moment_center,
+            symmetry_plane=_blank_to_none(frame_symmetry_plane),
+            moment_center=_blank_to_none(frame_moment_center),
             area=reference_area,
-            length=reference_length,
-            span=reference_span,
-            velocity=flow_velocity,
-            mach=flow_mach,
+            length=_parse_optional_float(reference_length, "reference_length"),
+            span=_parse_optional_float(reference_span, "reference_span"),
+            velocity=_parse_optional_float(flow_velocity, "flow_velocity"),
+            mach=_parse_optional_float(flow_mach, "flow_mach"),
             aoa=flow_aoa,
             sideslip=flow_sideslip,
-            altitude=flow_altitude,
-            density=flow_density,
-            viscosity=flow_viscosity,
-            notes=notes,
+            altitude=_parse_optional_float(flow_altitude, "flow_altitude"),
+            density=_parse_optional_float(flow_density, "flow_density"),
+            viscosity=_parse_optional_float(flow_viscosity, "flow_viscosity"),
+            notes=_blank_to_none(notes),
         )
 
     def to_analysis_request(self, geometry_file: str) -> AnalysisRequest:
@@ -144,3 +144,21 @@ class PreflightMultipartForm(BaseModel):
             ),
             notes=self.notes,
         )
+
+
+def _blank_to_none(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str) and value.strip() == "":
+        return None
+    return value
+
+
+def _parse_optional_float(value: str | None, field_name: str) -> float | None:
+    normalized = _blank_to_none(value)
+    if normalized is None:
+        return None
+    try:
+        return float(normalized)
+    except ValueError as exc:  # pragma: no cover - defensive input guard
+        raise HTTPException(status_code=422, detail=f"{field_name} must be a number") from exc

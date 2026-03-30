@@ -1,12 +1,28 @@
-# 구현 계획 스냅샷
+# Plan Snapshot
 
-이 저장소는 다음 핵심 구조를 구현 대상으로 삼는다.
+## Current direction
 
-- 로컬 FastAPI 제어면
-- custom agent runtime
-- deterministic CFD core
-- OpenAI/Codex provider adapters
-- React/vtk.js 기반 GUI
-- upload -> preflight -> approval -> run -> report/viewer 수직 슬라이스
+- Keep the existing backend single-path CFD flow intact.
+- Rework the GUI into a desktop-first app shell and conversational workbench.
+- Keep the local-first, snapshot-backed execution model.
 
-세부 제품 계획은 대화에서 확정한 `독립형 LLM 에이전트 기반 공력 해석 로컬 앱 구현 계획 v1.2`를 기준으로 한다.
+## Lifecycle correctness focus
+
+- Optional blank form fields should normalize to `None` before preflight parsing.
+- `create_job` should be idempotent per preflight snapshot.
+- Snapshot consumption should happen atomically at approval time, not in the worker.
+- Job summary responses should include source file name and timestamps for session rows.
+- STEP normalization failures should be treated as user-facing blocker cases instead of generic server errors when the backend path supports it.
+
+## Current implementation status
+
+- Backend preflight / approval / worker separation is already in place.
+- Snapshot-backed execution and SSE events are already the active path.
+- GUI shell refactor is still the next major UX layer.
+
+## Next UI layer
+
+- Sidebar for recent sessions and settings.
+- Threaded workspace for preflight, approval, run, and artifact events.
+- Composer bar for quick actions.
+- Inspector drawer for hashes, blockers, and artifact metadata.

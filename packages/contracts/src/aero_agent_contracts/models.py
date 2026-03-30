@@ -246,7 +246,7 @@ class NormalizationSummary(BaseModel):
     declared_unit: str
     canonical_unit: str = "m"
     scale_factor_to_meter: float
-    axis_mapping: dict[str, str] = Field(default_factory=dict)
+    axis_mapping: dict[str, str | None] = Field(default_factory=dict)
     source_bbox: tuple[float, float, float, float, float, float] | None = None
     normalized_bbox: tuple[float, float, float, float, float, float] | None = None
     face_count: int | None = None
@@ -381,6 +381,9 @@ class JobSummaryResponse(BaseModel):
     selected_solver: SolverKind
     execution_mode: ExecutionMode
     ai_assist_mode: AIAssistMode
+    source_file_name: str
+    created_at: datetime
+    updated_at: datetime
     rationale: str | None = None
     progress: int = 0
     warnings: list[str] = Field(default_factory=list)

@@ -7,6 +7,7 @@ import type {
   GeometryTriageFinding,
   InstallStatusResponse,
   JobEventRecord,
+  JobEventType,
   JobSummaryResponse,
   PreflightResponse,
   SolverKind,
@@ -251,6 +252,24 @@ function normalizeJobSummary(raw: unknown): JobSummaryResponse {
     selected_solver: toSolverKind(record.selected_solver ?? record.selectedSolver),
     execution_mode: toExecutionMode(record.execution_mode ?? record.executionMode),
     ai_assist_mode: toAIAssistMode(record.ai_assist_mode ?? record.aiAssistMode),
+    source_file_name:
+      typeof record.source_file_name === "string"
+        ? record.source_file_name
+        : typeof record.sourceFileName === "string"
+          ? record.sourceFileName
+          : "unknown geometry",
+    created_at:
+      typeof record.created_at === "string"
+        ? record.created_at
+        : typeof record.createdAt === "string"
+          ? record.createdAt
+          : new Date().toISOString(),
+    updated_at:
+      typeof record.updated_at === "string"
+        ? record.updated_at
+        : typeof record.updatedAt === "string"
+          ? record.updatedAt
+          : new Date().toISOString(),
     preflight_snapshot_id:
       typeof record.preflight_snapshot_id === "string"
         ? record.preflight_snapshot_id
@@ -273,6 +292,16 @@ function normalizeJobSummary(raw: unknown): JobSummaryResponse {
           ? null
           : String(record.error),
   };
+}
+
+function appendOptionalField(formData: FormData, key: string, value: string | null | undefined) {
+  if (typeof value !== "string") {
+    return;
+  }
+  if (value.trim() === "") {
+    return;
+  }
+  formData.set(key, value);
 }
 
 type ApiJobEventRecord = JobEventRecord;
@@ -314,21 +343,21 @@ function buildPreflightFormData(request: AnalysisFormState, connectionMode: Conn
   formData.set("unit", request.unit);
   formData.set("frame_forward_axis", request.frame.forwardAxis);
   formData.set("frame_up_axis", request.frame.upAxis);
-  formData.set("frame_symmetry_plane", request.frame.symmetryPlane);
-  formData.set("frame_moment_center", request.frame.momentCenter);
+  appendOptionalField(formData, "frame_symmetry_plane", request.frame.symmetryPlane);
+  appendOptionalField(formData, "frame_moment_center", request.frame.momentCenter);
   formData.set("reference_area", request.referenceValues.area);
-  formData.set("reference_length", request.referenceValues.length);
-  formData.set("reference_span", request.referenceValues.span);
-  formData.set("flow_velocity", request.flow.velocity);
-  formData.set("flow_mach", request.flow.mach);
+  appendOptionalField(formData, "reference_length", request.referenceValues.length);
+  appendOptionalField(formData, "reference_span", request.referenceValues.span);
+  appendOptionalField(formData, "flow_velocity", request.flow.velocity);
+  appendOptionalField(formData, "flow_mach", request.flow.mach);
   formData.set("flow_aoa", request.flow.aoa);
   formData.set("flow_sideslip", request.flow.sideslip);
-  formData.set("flow_altitude", request.flow.altitude);
-  formData.set("flow_density", request.flow.density);
-  formData.set("flow_viscosity", request.flow.viscosity);
+  appendOptionalField(formData, "flow_altitude", request.flow.altitude);
+  appendOptionalField(formData, "flow_density", request.flow.density);
+  appendOptionalField(formData, "flow_viscosity", request.flow.viscosity);
   formData.set("fidelity", request.fidelity);
   formData.set("solver_preference", request.solverPreference);
-  formData.set("notes", request.notes);
+  appendOptionalField(formData, "notes", request.notes);
   formData.set("geometry_file", request.geometryFile);
   return formData;
 }
@@ -495,6 +524,8 @@ export function subscribeJobEvents(jobId: string, onEvent: (event: JobEventRecor
     source.close();
   };
 }
+
+export type { JobEventType };
 
 function loadEventRecord(raw: unknown, jobId: string): JobEventRecord {
   const record = isRecord(raw) ? raw : {};

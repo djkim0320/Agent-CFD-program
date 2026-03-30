@@ -130,6 +130,9 @@ export interface JobSummaryResponse {
   selected_solver: SolverKind;
   execution_mode: ExecutionMode;
   ai_assist_mode: AIAssistMode;
+  source_file_name: string;
+  created_at: string;
+  updated_at: string;
   preflight_snapshot_id: string;
   rationale: string;
   progress: number;

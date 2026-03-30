@@ -120,7 +120,6 @@ class JobExecutionService:
 
         try:
             self._verify_snapshot(snapshot)
-            self._consume_snapshot(snapshot, job.id)
             job.started_at = utc_now()
             job.status = JobStatus.RUNNING
             job.progress = 15
@@ -316,6 +315,8 @@ class JobExecutionService:
     def _verify_snapshot(self, snapshot: PreflightSnapshot) -> None:
         if snapshot.status == SnapshotStatus.EXPIRED:
             raise RuntimeError("Preflight snapshot expired.")
+        if snapshot.status != SnapshotStatus.CONSUMED:
+            raise RuntimeError("Preflight snapshot must be claimed before execution.")
         snapshot_dir = self._snapshot_dir(snapshot.id)
         if not snapshot_dir.exists():
             raise RuntimeError("Preflight snapshot directory is missing.")
@@ -334,12 +335,6 @@ class JobExecutionService:
             raise RuntimeError("Preflight snapshot manifest hash mismatch.")
         if self.cfd_core.compute_sha256(normalized_geometry_path) != snapshot.normalized_geometry_hash:
             raise RuntimeError("Preflight snapshot normalized geometry hash mismatch.")
-
-    def _consume_snapshot(self, snapshot: PreflightSnapshot, job_id: str) -> None:
-        snapshot.status = SnapshotStatus.CONSUMED
-        snapshot.consumed_by_job_id = job_id
-        snapshot.consumed_at = utc_now()
-        self.repository.update_preflight_snapshot(snapshot)
 
     def _check_cancel(self, job: JobRecord) -> None:
         current = self.repository.get_job(job.id)

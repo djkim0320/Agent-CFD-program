@@ -232,7 +232,24 @@ async def create_preflight(
         except Exception as exc:
             bundle.runtime_blockers = unique_strings(bundle.runtime_blockers + [f"Geometry normalization failed: {exc}"])
             bundle.execution_mode = ExecutionMode.SCAFFOLD
-            normalization_summary = {"caveats": [str(exc)]}
+            normalization_summary = {
+                "source_format": bundle.geometry_manifest.format or Path(source_path).suffix.lstrip(".") or None,
+                "declared_unit": request.unit,
+                "canonical_unit": "m",
+                "scale_factor_to_meter": 1.0,
+                "axis_mapping": {
+                    "forward_axis": request.frame.forward_axis if request.frame else "x",
+                    "up_axis": request.frame.up_axis if request.frame else "z",
+                    "symmetry_plane": request.frame.symmetry_plane if request.frame else None,
+                },
+                "source_bbox": list(bundle.geometry_manifest.stats.bbox) if bundle.geometry_manifest.stats.bbox else None,
+                "normalized_bbox": None,
+                "face_count": bundle.geometry_manifest.stats.face_count,
+                "component_count": bundle.geometry_manifest.stats.component_count,
+                "watertight": bundle.geometry_manifest.stats.watertight,
+                "repair_actions": list(bundle.repair_result.repair_actions),
+                "caveats": [str(exc)],
+            }
 
     normalized_manifest_path = normalized_dir / "normalized_manifest.json"
     normalized_manifest_path.write_text(
@@ -320,6 +337,9 @@ def create_job(payload: CreateJobFromPreflightRequest) -> JobSummaryResponse:
     snapshot = repo.get_preflight_snapshot(payload.preflight_id)
     if not snapshot:
         raise HTTPException(status_code=404, detail="preflight snapshot not found")
+    existing_job = repo.get_job_by_preflight_snapshot_id(snapshot.id)
+    if existing_job:
+        return to_job_summary(existing_job)
     if snapshot.status == SnapshotStatus.EXPIRED or snapshot.expires_at <= utc_now():
         raise HTTPException(status_code=409, detail="preflight snapshot expired")
     if snapshot.status == SnapshotStatus.CONSUMED:
@@ -343,7 +363,9 @@ def create_job(payload: CreateJobFromPreflightRequest) -> JobSummaryResponse:
         source_file_name=snapshot.source_file_name,
         source_file_path=str(source_path),
     )
-    repo.create_job(job)
+    stored_job = repo.create_job(job)
+    if stored_job.id != job.id:
+        return to_job_summary(stored_job)
     persist_event_sync(job.id, EventType.JOB_STATUS, {"status": job.status.value, "progress": job.progress})
     persist_event_sync(job.id, EventType.PREFLIGHT_COMPLETED, {"preflight_id": snapshot.id, "selected_solver": snapshot.selected_solver.value})
     persist_event_sync(job.id, EventType.APPROVAL_REQUIRED, {"message": "Manual approval required before solver execution."})
@@ -365,6 +387,9 @@ def approve_job(job_id: str) -> JobSummaryResponse:
     if snapshot.execution_mode != ExecutionMode.REAL or snapshot.runtime_blockers:
         raise HTTPException(status_code=409, detail="preflight snapshot is not executable")
     verify_snapshot_integrity(snapshot)
+    claimed_snapshot = repo.claim_preflight_snapshot(snapshot.id, job.id, consumed_at=utc_now())
+    if not claimed_snapshot:
+        raise HTTPException(status_code=409, detail="preflight snapshot is not ready for execution")
 
     job.status = JobStatus.QUEUED
     job.approved_at = utc_now()
@@ -583,6 +608,9 @@ def to_job_summary(job: JobRecord) -> JobSummaryResponse:
         selected_solver=job.selected_solver,
         execution_mode=job.execution_mode,
         ai_assist_mode=job.ai_assist_mode,
+        source_file_name=job.source_file_name,
+        created_at=job.created_at,
+        updated_at=job.updated_at,
         rationale=job.rationale,
         progress=job.progress,
         warnings=list(job.warnings),

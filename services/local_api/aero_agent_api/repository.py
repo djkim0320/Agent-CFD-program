@@ -121,6 +121,8 @@ class Repository:
                 );
                 CREATE INDEX IF NOT EXISTS idx_job_events_job_id_seq
                     ON job_events(job_id, seq);
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_jobs_preflight_snapshot_id
+                    ON jobs(preflight_snapshot_id);
                 """
             )
             self._ensure_job_columns(conn)
@@ -243,6 +245,28 @@ class Repository:
             row = conn.execute("SELECT * FROM preflight_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
         return self._row_to_snapshot(row) if row else None
 
+    def claim_preflight_snapshot(self, snapshot_id: str, job_id: str, *, consumed_at: datetime | None = None) -> PreflightSnapshot | None:
+        consumed_at = consumed_at or utcnow()
+        with self.connect() as conn:
+            cursor = conn.execute(
+                """
+                UPDATE preflight_snapshots
+                SET status = ?, consumed_by_job_id = ?, consumed_at = ?
+                WHERE id = ? AND status = ? AND consumed_by_job_id IS NULL
+                """,
+                (
+                    SnapshotStatus.CONSUMED.value,
+                    job_id,
+                    consumed_at.isoformat(),
+                    snapshot_id,
+                    SnapshotStatus.READY.value,
+                ),
+            )
+            if cursor.rowcount != 1:
+                return None
+            row = conn.execute("SELECT * FROM preflight_snapshots WHERE id = ?", (snapshot_id,)).fetchone()
+        return self._row_to_snapshot(row) if row else None
+
     def update_preflight_snapshot(self, snapshot: PreflightSnapshot) -> PreflightSnapshot:
         with self.connect() as conn:
             conn.execute(
@@ -323,7 +347,7 @@ class Repository:
 
     def create_job(self, job: JobRecord) -> JobRecord:
         with self.connect() as conn:
-            conn.execute(
+            cursor = conn.execute(
                 """
                 INSERT INTO jobs (
                     id, connection_id, preflight_snapshot_id, status, selected_solver, execution_mode,
@@ -334,10 +358,14 @@ class Repository:
                     approved_at, queued_at, started_at, cancelled_at, cancel_requested_at,
                     completed_at, failed_at
                 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(preflight_snapshot_id) DO NOTHING
                 """,
                 self._job_params(job),
             )
-        return job
+            if cursor.rowcount == 0:
+                row = conn.execute("SELECT * FROM jobs WHERE preflight_snapshot_id = ?", (job.preflight_snapshot_id,)).fetchone()
+                return self._row_to_job(row) if row else job
+        return self.get_job(job.id) or job
 
     def update_job(self, job: JobRecord) -> JobRecord:
         job.updated_at = utcnow()
@@ -382,6 +410,11 @@ class Repository:
     def get_job(self, job_id: str) -> JobRecord | None:
         with self.connect() as conn:
             row = conn.execute("SELECT * FROM jobs WHERE id = ?", (job_id,)).fetchone()
+        return self._row_to_job(row) if row else None
+
+    def get_job_by_preflight_snapshot_id(self, preflight_snapshot_id: str) -> JobRecord | None:
+        with self.connect() as conn:
+            row = conn.execute("SELECT * FROM jobs WHERE preflight_snapshot_id = ?", (preflight_snapshot_id,)).fetchone()
         return self._row_to_job(row) if row else None
 
     def list_jobs(self) -> list[JobRecord]:
