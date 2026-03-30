@@ -8,7 +8,7 @@ import queue
 import threading
 from typing import Any
 
-from aero_agent_cfd_core import CFDCore, CFDResults, CaseManifest
+from aero_agent_cfd_core import CFDCore, CFDResults, CaseManifest, MaterializedSnapshot
 from aero_agent_contracts import (
     EventType,
     JobEventRecord,
@@ -30,6 +30,7 @@ def utc_now() -> datetime:
 class ActiveRun:
     job_id: str
     phase: str
+    mesh_handle: SolverRuntimeHandle | None = None
     solver_handle: SolverRuntimeHandle | None = None
     cancel_requested: bool = False
     started_at: datetime = field(default_factory=utc_now)
@@ -82,7 +83,10 @@ class JobExecutionService:
             if not active:
                 return
             active.cancel_requested = True
+            mesh_handle = active.mesh_handle
             handle = active.solver_handle
+        if mesh_handle is not None:
+            self.cfd_core.terminate_solver(mesh_handle)
         if handle is not None:
             self.cfd_core.terminate_solver(handle)
 
@@ -124,7 +128,7 @@ class JobExecutionService:
 
             job_dir = self._job_dir(job.id)
             snapshot_dir = self._snapshot_dir(snapshot.id)
-            source_path, normalized_manifest_path = self.cfd_core.materialize_snapshot(
+            materialized = self.cfd_core.materialize_snapshot(
                 snapshot_dir,
                 job_dir,
                 source_file_name=snapshot.source_file_name,
@@ -133,7 +137,7 @@ class JobExecutionService:
             with self._lock:
                 self._active_runs[job.id] = ActiveRun(job_id=job.id, phase="prepare_case")
 
-            case_manifest = self._prepare_case(job, job_dir, source_path, normalized_manifest_path)
+            case_manifest = self._prepare_case(job, job_dir, materialized)
             self._check_cancel(job)
             self._generate_mesh(job, case_manifest)
             self._check_cancel(job)
@@ -142,11 +146,6 @@ class JobExecutionService:
             results, report, viewer, artifacts = self._postprocess(job, job_dir, run_manifest)
             self._complete_job(job, results, artifacts)
             self._emit_artifact_events(job.id, artifacts, report)
-            self._persist_event(
-                job.id,
-                EventType.JOB_COMPLETED,
-                {"status": job.status.value, "progress": job.progress, "message": "Analysis completed."},
-            )
         except CancelledError as exc:
             current = self.repository.get_job(job.id) or job
             current.status = JobStatus.CANCELLED
@@ -175,8 +174,7 @@ class JobExecutionService:
         self,
         job: JobRecord,
         job_dir: Path,
-        source_path: Path,
-        normalized_manifest_path: Path,
+        materialized: MaterializedSnapshot,
     ) -> CaseManifest:
         job.progress = 25
         self._persist_job_and_event(
@@ -188,8 +186,9 @@ class JobExecutionService:
             job_id=job.id,
             job_dir=job_dir,
             request=job.request,
-            source_geometry_path=source_path,
-            normalized_manifest_path=normalized_manifest_path,
+            normalized_geometry_path=materialized.normalized_geometry_path,
+            normalized_manifest_path=materialized.normalized_manifest_path,
+            normalization_manifest_path=materialized.normalization_manifest_path,
             selected_solver=job.selected_solver,
         )
         self._persist_event(
@@ -209,7 +208,16 @@ class JobExecutionService:
             EventType.TOOL_STARTED,
             {"tool": "mesh.generate", "progress": job.progress, "message": "Generating mesh with gmsh."},
         )
-        mesh_path = self.cfd_core.generate_mesh(case_manifest)
+        handle = self.cfd_core.launch_mesh(job_id=job.id, case_manifest=case_manifest)
+        with self._lock:
+            if job.id in self._active_runs:
+                self._active_runs[job.id].mesh_handle = handle
+                self._active_runs[job.id].phase = "meshing"
+        try:
+            mesh_path = self.cfd_core.wait_for_mesh(handle, case_manifest=case_manifest)
+        except Exception:
+            self._check_cancel(job)
+            raise
         self._persist_event(
             job.id,
             EventType.TOOL_COMPLETED,
@@ -217,6 +225,7 @@ class JobExecutionService:
         )
         with self._lock:
             if job.id in self._active_runs:
+                self._active_runs[job.id].mesh_handle = None
                 self._active_runs[job.id].phase = "solver.run"
 
     def _run_solver(self, job: JobRecord, case_manifest: CaseManifest):
@@ -230,8 +239,13 @@ class JobExecutionService:
         with self._lock:
             if job.id in self._active_runs:
                 self._active_runs[job.id].solver_handle = handle
-        run_manifest = self.cfd_core.wait_for_solver(handle)
+        try:
+            run_manifest = self.cfd_core.wait_for_solver(handle)
+        except Exception:
+            self._check_cancel(job)
+            raise
         if run_manifest.status != JobStatus.COMPLETED:
+            self._check_cancel(job)
             raise RuntimeError(f"Solver execution failed. Log: {run_manifest.logs_path}")
         self._persist_event(
             job.id,
@@ -274,8 +288,11 @@ class JobExecutionService:
         job.completed_at = utc_now()
         job.metrics = list(results.metrics)
         job.artifacts = list(artifacts)
-        job.updated_at = utc_now()
-        self.repository.update_job(job)
+        self._persist_job_and_event(
+            job,
+            EventType.JOB_COMPLETED,
+            {"status": job.status.value, "progress": job.progress, "message": "Analysis completed."},
+        )
 
     def _emit_artifact_events(self, job_id: str, artifacts: list, report: ReportManifest) -> None:
         for artifact in artifacts:
@@ -302,6 +319,21 @@ class JobExecutionService:
         snapshot_dir = self._snapshot_dir(snapshot.id)
         if not snapshot_dir.exists():
             raise RuntimeError("Preflight snapshot directory is missing.")
+        source_path = self.data_dir / snapshot.source_file_relpath
+        normalized_manifest_path = self.data_dir / snapshot.normalized_manifest_relpath
+        normalized_geometry_path = self.data_dir / snapshot.normalized_geometry_relpath
+        if not source_path.exists():
+            raise RuntimeError("Preflight snapshot source file is missing.")
+        if not normalized_manifest_path.exists():
+            raise RuntimeError("Preflight snapshot manifest is missing.")
+        if not normalized_geometry_path.exists():
+            raise RuntimeError("Preflight snapshot normalized geometry is missing.")
+        if self.cfd_core.compute_sha256(source_path) != snapshot.source_hash:
+            raise RuntimeError("Preflight snapshot source hash mismatch.")
+        if self.cfd_core.compute_sha256(normalized_manifest_path) != snapshot.normalized_manifest_hash:
+            raise RuntimeError("Preflight snapshot manifest hash mismatch.")
+        if self.cfd_core.compute_sha256(normalized_geometry_path) != snapshot.normalized_geometry_hash:
+            raise RuntimeError("Preflight snapshot normalized geometry hash mismatch.")
 
     def _consume_snapshot(self, snapshot: PreflightSnapshot, job_id: str) -> None:
         snapshot.status = SnapshotStatus.CONSUMED

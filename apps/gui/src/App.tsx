@@ -350,6 +350,8 @@ function App() {
                   <div><span>Selected solver</span><strong>{preflight.selected_solver}</strong></div>
                   <div><span>Execution mode</span><strong>{preflight.execution_mode}</strong></div>
                   <div><span>AI assist mode</span><strong>{preflight.ai_assist_mode}</strong></div>
+                  <div><span>Physics grade</span><strong>{preflight.physics_grade}</strong></div>
+                  <div><span>Mesh strategy</span><strong>{preflight.mesh_strategy}</strong></div>
                   <div><span>Runtime estimate</span><strong>{formatMaybeNumber(preflight.runtime_estimate_minutes)} min</strong></div>
                   <div><span>Memory estimate</span><strong>{formatMaybeNumber(preflight.memory_estimate_gb)} GB</strong></div>
                   <div><span>Confidence</span><strong>{formatPercent(preflight.confidence)}</strong></div>
@@ -372,6 +374,10 @@ function App() {
                   <label><span>request_digest</span><input value={preflight.request_digest} readOnly /></label>
                   <label><span>source_hash</span><input value={preflight.source_hash} readOnly /></label>
                   <label><span>normalized_manifest_hash</span><input value={preflight.normalized_manifest_hash} readOnly /></label>
+                  <label><span>normalized_geometry_hash</span><input value={preflight.normalized_geometry_hash} readOnly /></label>
+                </div>
+                <div className="field-list">
+                  <label><span>Normalization summary</span><textarea value={JSON.stringify(preflight.normalization_summary, null, 2)} readOnly rows={8} /></label>
                 </div>
                 <div className="subagent-grid">
                   <div className="subagent-card"><div className="section-head"><h4>geometry-triage</h4><span className="badge soft">{preflight.subagent_findings.geometry_triage.repairability}</span></div><p className="detail-copy">{preflight.subagent_findings.geometry_triage.geometry_kind}</p><ul className="bullet-list">{preflight.subagent_findings.geometry_triage.risks.map((item) => <li key={item}>{item}</li>)}</ul></div>

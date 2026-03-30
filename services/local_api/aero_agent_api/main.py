@@ -211,10 +211,41 @@ async def create_preflight(
 
     request_digest = digest_payload(request.model_dump(mode="json"))
     source_hash = get_cfd_core().compute_sha256(source_path)
+    normalization_summary: dict[str, Any] = {}
+    normalization_manifest_relpath = ""
+    normalized_geometry_relpath = ""
+    normalized_geometry_hash = ""
+    normalization_artifacts = None
+    if bundle.geometry_manifest.geometry_kind == bundle.geometry_manifest.geometry_kind.GENERAL_3D:
+        try:
+            normalization_artifacts = get_cfd_core().normalize_geometry_artifacts(
+                request=request,
+                source_file_path=source_path,
+                geometry_manifest=bundle.geometry_manifest,
+                repair_result=bundle.repair_result,
+                output_dir=normalized_dir,
+            )
+            normalization_summary = normalization_artifacts.summary
+            normalization_manifest_relpath = str(normalization_artifacts.normalization_manifest_path.relative_to(get_data_dir()))
+            normalized_geometry_relpath = str(normalization_artifacts.geometry_path.relative_to(get_data_dir()))
+            normalized_geometry_hash = normalization_artifacts.geometry_hash
+        except Exception as exc:
+            bundle.runtime_blockers = unique_strings(bundle.runtime_blockers + [f"Geometry normalization failed: {exc}"])
+            bundle.execution_mode = ExecutionMode.SCAFFOLD
+            normalization_summary = {"caveats": [str(exc)]}
 
     normalized_manifest_path = normalized_dir / "normalized_manifest.json"
     normalized_manifest_path.write_text(
-        json.dumps(get_cfd_core().normalized_manifest_payload(bundle), indent=2, ensure_ascii=True, default=str),
+        json.dumps(
+            get_cfd_core().normalized_manifest_payload(
+                bundle,
+                normalization_summary=normalization_summary or None,
+                ai_assist_mode=ai_assist_mode,
+            ),
+            indent=2,
+            ensure_ascii=True,
+            default=str,
+        ),
         encoding="utf-8",
     )
     normalized_manifest_hash = get_cfd_core().compute_sha256(normalized_manifest_path)
@@ -233,6 +264,7 @@ async def create_preflight(
                 "request_digest": request_digest,
                 "source_hash": source_hash,
                 "normalized_manifest_hash": normalized_manifest_hash,
+                "normalized_geometry_hash": normalized_geometry_hash,
             },
             indent=2,
             ensure_ascii=True,
@@ -247,12 +279,15 @@ async def create_preflight(
         source_file_name=geometry_file.filename or source_path.name,
         source_file_relpath=str(source_path.relative_to(get_data_dir())),
         normalized_manifest_relpath=str(normalized_manifest_path.relative_to(get_data_dir())),
+        normalization_manifest_relpath=normalization_manifest_relpath,
+        normalized_geometry_relpath=normalized_geometry_relpath,
         preflight_plan_relpath=str(plan_path.relative_to(get_data_dir())),
         subagent_findings_relpath=str(findings_path.relative_to(get_data_dir())),
         request=request,
         request_digest=request_digest,
         source_hash=source_hash,
         normalized_manifest_hash=normalized_manifest_hash,
+        normalized_geometry_hash=normalized_geometry_hash,
         selected_solver=bundle.solver_selection.selected_solver,
         execution_mode=bundle.execution_mode,
         ai_assist_mode=ai_assist_mode,
@@ -274,6 +309,8 @@ async def create_preflight(
         request_digest=request_digest,
         source_hash=source_hash,
         normalized_manifest_hash=normalized_manifest_hash,
+        normalized_geometry_hash=normalized_geometry_hash,
+        normalization_summary=normalization_summary,
     )
 
 
@@ -325,9 +362,9 @@ def approve_job(job_id: str) -> JobSummaryResponse:
         raise HTTPException(status_code=404, detail="preflight snapshot not found")
     if snapshot.status != SnapshotStatus.READY:
         raise HTTPException(status_code=409, detail="preflight snapshot is not ready for execution")
-    verify_snapshot_integrity(snapshot)
     if snapshot.execution_mode != ExecutionMode.REAL or snapshot.runtime_blockers:
         raise HTTPException(status_code=409, detail="preflight snapshot is not executable")
+    verify_snapshot_integrity(snapshot)
 
     job.status = JobStatus.QUEUED
     job.approved_at = utc_now()
@@ -482,6 +519,9 @@ def cleanup_expired_snapshots(repo) -> None:
 def verify_snapshot_integrity(snapshot: PreflightSnapshot) -> None:
     snapshot_dir = get_data_dir() / "snapshots" / snapshot.id
     integrity_path = snapshot_dir / "preflight" / "integrity.json"
+    source_path = get_data_dir() / snapshot.source_file_relpath
+    normalized_manifest_path = get_data_dir() / snapshot.normalized_manifest_relpath
+    normalized_geometry_path = get_data_dir() / snapshot.normalized_geometry_relpath
     if not integrity_path.exists():
         raise HTTPException(status_code=409, detail="snapshot integrity file missing")
     payload = json.loads(integrity_path.read_text(encoding="utf-8"))
@@ -491,6 +531,20 @@ def verify_snapshot_integrity(snapshot: PreflightSnapshot) -> None:
         raise HTTPException(status_code=409, detail="snapshot source hash mismatch")
     if payload.get("normalized_manifest_hash") != snapshot.normalized_manifest_hash:
         raise HTTPException(status_code=409, detail="snapshot manifest hash mismatch")
+    if payload.get("normalized_geometry_hash") != snapshot.normalized_geometry_hash:
+        raise HTTPException(status_code=409, detail="snapshot normalized geometry hash mismatch")
+    if not source_path.exists():
+        raise HTTPException(status_code=409, detail="snapshot source file missing")
+    if not normalized_manifest_path.exists():
+        raise HTTPException(status_code=409, detail="snapshot normalized manifest missing")
+    if not normalized_geometry_path.exists():
+        raise HTTPException(status_code=409, detail="snapshot normalized geometry missing")
+    if get_cfd_core().compute_sha256(source_path) != snapshot.source_hash:
+        raise HTTPException(status_code=409, detail="snapshot source hash does not match file contents")
+    if get_cfd_core().compute_sha256(normalized_manifest_path) != snapshot.normalized_manifest_hash:
+        raise HTTPException(status_code=409, detail="snapshot manifest hash does not match file contents")
+    if get_cfd_core().compute_sha256(normalized_geometry_path) != snapshot.normalized_geometry_hash:
+        raise HTTPException(status_code=409, detail="snapshot normalized geometry hash does not match file contents")
 
 
 def persist_event_sync(job_id: str, event_type: EventType, payload: dict[str, Any]) -> None:

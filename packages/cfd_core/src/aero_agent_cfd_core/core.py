@@ -40,7 +40,7 @@ from aero_agent_contracts import (
     SubagentFindings,
     ViewerManifest,
 )
-from aero_agent_solver_adapters import SolverAdapterRegistry, SolverRuntimeHandle
+from aero_agent_solver_adapters import GmshRunManifest, SolverAdapterRegistry, SolverRuntimeHandle
 from aero_agent_viewer_assets import ViewerAssetBuilder
 
 
@@ -51,12 +51,35 @@ class TriangleMesh:
 
 
 @dataclass(slots=True)
+class NormalizedGeometryArtifacts:
+    normalization_manifest_path: Path
+    geometry_path: Path
+    geometry_hash: str
+    summary: dict[str, object]
+
+
+@dataclass(slots=True)
+class MaterializedSnapshot:
+    source_path: Path
+    normalized_manifest_path: Path
+    normalization_manifest_path: Path
+    normalized_geometry_path: Path
+
+
+@dataclass(slots=True)
 class CaseManifest:
     job_id: str
     solver: SolverKind
+    fidelity: str
     case_dir: Path
     cfg_path: Path
     geometry_path: Path
+    normalized_manifest_path: Path
+    normalization_manifest_path: Path
+    mesh_script_path: Path
+    mesh_manifest_path: Path
+    mesh_log_path: Path
+    case_manifest_path: Path
     mesh_path: Path
     results_dir: Path
     logs_dir: Path
@@ -155,6 +178,8 @@ class CFDCore:
         request_digest: str,
         source_hash: str,
         normalized_manifest_hash: str,
+        normalized_geometry_hash: str,
+        normalization_summary: dict[str, object],
     ) -> PreflightResponse:
         return PreflightResponse(
             preflight_id=snapshot_id,
@@ -169,6 +194,10 @@ class CFDCore:
             request_digest=request_digest,
             source_hash=source_hash,
             normalized_manifest_hash=normalized_manifest_hash,
+            normalized_geometry_hash=normalized_geometry_hash,
+            normalization_summary=normalization_summary,
+            physics_grade="stable_trend_grade",
+            mesh_strategy="box_farfield",
             runtime_estimate_minutes=bundle.solver_selection.runtime_estimate_minutes,
             memory_estimate_gb=bundle.solver_selection.memory_estimate_gb,
             confidence=bundle.confidence,
@@ -220,13 +249,70 @@ class CFDCore:
             },
         }
 
-    def normalized_manifest_payload(self, bundle: PreflightBundle) -> dict[str, object]:
-        return {
+    def normalized_manifest_payload(
+        self,
+        bundle: PreflightBundle,
+        *,
+        normalization_summary: dict[str, object] | None = None,
+        ai_assist_mode: AIAssistMode | None = None,
+    ) -> dict[str, object]:
+        payload = {
             "geometry_manifest": bundle.geometry_manifest.model_dump(mode="json"),
             "repair_result": bundle.repair_result.model_dump(mode="json"),
             "selected_solver": bundle.solver_selection.selected_solver.value,
             "execution_mode": bundle.execution_mode.value,
         }
+        if ai_assist_mode is not None:
+            payload["ai_assist_mode"] = ai_assist_mode.value
+        if normalization_summary is not None:
+            payload["normalization_summary"] = normalization_summary
+        return payload
+
+    def normalize_geometry_artifacts(
+        self,
+        *,
+        request: AnalysisRequest,
+        source_file_path: Path,
+        geometry_manifest: GeometryManifest,
+        repair_result: RepairCheckResult,
+        output_dir: Path,
+    ) -> NormalizedGeometryArtifacts:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        geometry_dir = output_dir / "geometry"
+        geometry_dir.mkdir(parents=True, exist_ok=True)
+
+        mesh = self._load_triangle_mesh(source_file_path)
+        if not mesh.faces:
+            raise RuntimeError("Geometry normalization requires a triangulated surface mesh.")
+
+        normalized_mesh, normalization_summary = self._normalize_mesh(mesh, request=request, source_file_path=source_file_path)
+        geometry_path = geometry_dir / "body_normalized.stl"
+        self._write_binary_stl(geometry_path, normalized_mesh)
+
+        normalized_bbox = self._bbox_from_vertices(normalized_mesh.vertices)
+        summary = {
+            "source_format": geometry_manifest.format or source_file_path.suffix.lstrip("."),
+            "declared_unit": request.unit,
+            "canonical_unit": "m",
+            "scale_factor_to_meter": normalization_summary["scale_factor"],
+            "axis_mapping": normalization_summary["axis_mapping"],
+            "source_bbox": list(geometry_manifest.stats.bbox) if geometry_manifest.stats.bbox else None,
+            "normalized_bbox": list(normalized_bbox) if normalized_bbox else None,
+            "face_count": geometry_manifest.stats.face_count,
+            "component_count": geometry_manifest.stats.component_count,
+            "watertight": geometry_manifest.stats.watertight,
+            "repair_actions": list(repair_result.repair_actions),
+            "caveats": list(normalization_summary["caveats"]),
+        }
+        normalization_manifest_path = output_dir / "normalization_manifest.json"
+        normalization_manifest_path.write_text(json_dumps(summary), encoding="utf-8")
+        geometry_hash = self.compute_sha256(geometry_path)
+        return NormalizedGeometryArtifacts(
+            normalization_manifest_path=normalization_manifest_path,
+            geometry_path=geometry_path,
+            geometry_hash=geometry_hash,
+            summary=summary,
+        )
 
     def inspect_geometry(
         self,
@@ -351,26 +437,41 @@ class CFDCore:
         job_dir: Path,
         *,
         source_file_name: str,
-    ) -> tuple[Path, Path]:
+    ) -> MaterializedSnapshot:
         source_snapshot = snapshot_dir / "input" / "original" / source_file_name
         normalized_snapshot = snapshot_dir / "normalized" / "normalized_manifest.json"
+        normalization_snapshot = snapshot_dir / "normalized" / "normalization_manifest.json"
+        normalized_geometry_snapshot = snapshot_dir / "normalized" / "geometry" / "body_normalized.stl"
         target_source = job_dir / "input" / "original" / source_file_name
         target_normalized = job_dir / "normalized" / "normalized_manifest.json"
+        target_normalization_manifest = job_dir / "normalized" / "normalization_manifest.json"
+        target_normalized_geometry = job_dir / "normalized" / "geometry" / "body_normalized.stl"
         target_source.parent.mkdir(parents=True, exist_ok=True)
         target_normalized.parent.mkdir(parents=True, exist_ok=True)
+        target_normalization_manifest.parent.mkdir(parents=True, exist_ok=True)
+        target_normalized_geometry.parent.mkdir(parents=True, exist_ok=True)
         self._materialize_file(source_snapshot, target_source)
         self._materialize_file(normalized_snapshot, target_normalized)
+        self._materialize_file(normalization_snapshot, target_normalization_manifest)
+        self._materialize_file(normalized_geometry_snapshot, target_normalized_geometry)
         (job_dir / "snapshot_ref.json").write_text(
             json_dumps(
                 {
+                    "preflight_id": snapshot_dir.name,
                     "snapshot_dir": str(snapshot_dir),
                     "source_file_name": source_file_name,
+                    "normalized_geometry": str(target_normalized_geometry),
                     "materialized_at": str(target_source.stat().st_mtime_ns),
                 }
             ),
             encoding="utf-8",
         )
-        return target_source, target_normalized
+        return MaterializedSnapshot(
+            source_path=target_source,
+            normalized_manifest_path=target_normalized,
+            normalization_manifest_path=target_normalization_manifest,
+            normalized_geometry_path=target_normalized_geometry,
+        )
 
     def prepare_case(
         self,
@@ -378,8 +479,9 @@ class CFDCore:
         job_id: str,
         job_dir: Path,
         request: AnalysisRequest,
-        source_geometry_path: Path,
+        normalized_geometry_path: Path,
         normalized_manifest_path: Path,
+        normalization_manifest_path: Path,
         selected_solver: SolverKind,
     ) -> CaseManifest:
         if selected_solver != SolverKind.SU2:
@@ -392,15 +494,21 @@ class CFDCore:
         for directory in (case_dir, mesh_dir, results_dir, logs_dir):
             directory.mkdir(parents=True, exist_ok=True)
 
-        case_geometry = case_dir / source_geometry_path.name
+        case_geometry = case_dir / "body_normalized.stl"
         manifest_copy = case_dir / "normalized_manifest.json"
-        self._materialize_file(source_geometry_path, case_geometry)
+        normalization_copy = case_dir / "normalization_manifest.json"
+        self._materialize_file(normalized_geometry_path, case_geometry)
         self._materialize_file(normalized_manifest_path, manifest_copy)
+        self._materialize_file(normalization_manifest_path, normalization_copy)
 
         cfg_path = case_dir / "case.cfg"
+        mesh_script_path = mesh_dir / "farfield.geo"
         mesh_path = mesh_dir / "mesh.su2"
+        mesh_log_path = mesh_dir / "gmsh.log"
+        mesh_manifest_path = mesh_dir / "mesh_manifest.json"
+        case_manifest_path = case_dir / "case_manifest.json"
         cfg_path.write_text(self._build_su2_config(request, mesh_path.name), encoding="utf-8")
-        (case_dir / "case_manifest.json").write_text(
+        case_manifest_path.write_text(
             json_dumps(
                 {
                     "job_id": job_id,
@@ -408,6 +516,11 @@ class CFDCore:
                     "geometry_path": str(case_geometry),
                     "mesh_path": str(mesh_path),
                     "cfg_path": str(cfg_path),
+                    "mesh_script_path": str(mesh_script_path),
+                    "mesh_manifest_path": str(mesh_manifest_path),
+                    "mesh_log_path": str(mesh_log_path),
+                    "physics_grade": "stable_trend_grade",
+                    "mesh_strategy": "box_farfield",
                 }
             ),
             encoding="utf-8",
@@ -415,39 +528,72 @@ class CFDCore:
         return CaseManifest(
             job_id=job_id,
             solver=selected_solver,
+            fidelity=request.fidelity,
             case_dir=case_dir,
             cfg_path=cfg_path,
             geometry_path=case_geometry,
+            normalized_manifest_path=manifest_copy,
+            normalization_manifest_path=normalization_copy,
+            mesh_script_path=mesh_script_path,
+            mesh_manifest_path=mesh_manifest_path,
+            mesh_log_path=mesh_log_path,
+            case_manifest_path=case_manifest_path,
             mesh_path=mesh_path,
             results_dir=results_dir,
             logs_dir=logs_dir,
         )
 
-    def generate_mesh(self, case_manifest: CaseManifest) -> Path:
-        gmsh = shutil.which("gmsh") or os.environ.get("AERO_AGENT_GMSH_PATH")
-        if not gmsh:
-            raise RuntimeError("gmsh not detected.")
+    def generate_mesh(self, *, job_id: str, case_manifest: CaseManifest) -> Path:
+        handle = self.launch_mesh(job_id=job_id, case_manifest=case_manifest)
+        return self.wait_for_mesh(handle, case_manifest=case_manifest)
 
-        command = [
-            str(gmsh),
-            str(case_manifest.geometry_path),
-            "-3",
-            "-format",
-            "su2",
-            "-o",
-            str(case_manifest.mesh_path),
-        ]
-        mesh_log = case_manifest.logs_dir / "gmsh.log"
-        with mesh_log.open("wb") as stream:
-            completed = subprocess.run(
-                command,
-                stdout=stream,
-                stderr=subprocess.STDOUT,
-                check=False,
-                timeout=300,
-            )
-        if completed.returncode != 0 or not case_manifest.mesh_path.exists():
-            raise RuntimeError(f"gmsh mesh generation failed. See log: {mesh_log}")
+    def launch_mesh(self, *, job_id: str, case_manifest: CaseManifest) -> SolverRuntimeHandle:
+        normalization_summary = self._read_json_file(case_manifest.normalization_manifest_path)
+        bbox = normalization_summary.get("normalized_bbox")
+        if not isinstance(bbox, list) or len(bbox) != 6:
+            raise RuntimeError("Normalized bbox is missing; cannot build farfield mesh.")
+        farfield_geo = self._build_farfield_geo(
+            case_manifest=case_manifest,
+            bbox=tuple(float(value) for value in bbox),
+        )
+        case_manifest.mesh_script_path.write_text(farfield_geo, encoding="utf-8")
+        return self.solver_registry.launch_gmsh(
+            job_id=job_id,
+            input_path=case_manifest.mesh_script_path,
+            output_path=case_manifest.mesh_path,
+            work_dir=case_manifest.mesh_path.parent,
+            log_path=case_manifest.mesh_log_path,
+            manifest_path=case_manifest.mesh_path.parent / "gmsh_run_manifest.json",
+        )
+
+    def wait_for_mesh(self, handle: SolverRuntimeHandle, *, case_manifest: CaseManifest) -> Path:
+        completed = self.solver_registry.wait_gmsh(handle)
+        if completed.status != JobStatus.COMPLETED or not case_manifest.mesh_path.exists():
+            raise RuntimeError(f"gmsh mesh generation failed. See log: {case_manifest.mesh_log_path}")
+        normalization_summary = self._read_json_file(case_manifest.normalization_manifest_path)
+        bbox = normalization_summary.get("normalized_bbox")
+        bbox_tuple = tuple(float(value) for value in bbox) if isinstance(bbox, list) and len(bbox) == 6 else None
+        case_manifest.mesh_manifest_path.write_text(
+            json_dumps(
+                {
+                    "mesh_strategy": "box_farfield",
+                    "normalized_geometry_hash": self.compute_sha256(case_manifest.geometry_path),
+                    "farfield_extents": self._farfield_extents(bbox_tuple) if bbox_tuple is not None else {},
+                    "marker_names": {"body": "body", "farfield": "farfield", "symmetry": "reserved"},
+                    "mesh_size_controls": self._mesh_sizing_from_bbox(
+                        bbox_tuple,
+                        fidelity=case_manifest.fidelity,
+                    ),
+                    "gmsh_command": list(completed.command),
+                    "gmsh_exit_status": completed.status.value,
+                    "mesh_file_hash": self.compute_sha256(case_manifest.mesh_path),
+                    "mesh_path": str(case_manifest.mesh_path),
+                    "mesh_log_path": str(case_manifest.mesh_log_path),
+                    "gmsh_run_manifest_path": str(case_manifest.mesh_path.parent / "gmsh_run_manifest.json"),
+                }
+            ),
+            encoding="utf-8",
+        )
         return case_manifest.mesh_path
 
     def launch_solver(self, *, job_id: str, case_manifest: CaseManifest) -> SolverRuntimeHandle:
@@ -457,6 +603,9 @@ class CFDCore:
         return self.solver_registry.wait(handle)
 
     def terminate_solver(self, handle: SolverRuntimeHandle) -> None:
+        if getattr(handle, "runtime_kind", None) and getattr(handle.runtime_kind, "value", "") == "gmsh":
+            self.solver_registry.terminate_gmsh(handle)
+            return
         self.solver_registry.terminate(handle)
 
     def extract_results(self, *, job_dir: Path, run_manifest: SolverRunManifest) -> CFDResults:
@@ -508,12 +657,55 @@ class CFDCore:
         report_dir.mkdir(parents=True, exist_ok=True)
         report_path = report_dir / "report.html"
         summary_path = report_dir / "summary.json"
+        normalization_manifest_path = job_dir / "normalized" / "normalization_manifest.json"
+        normalized_manifest_path = job_dir / "normalized" / "normalized_manifest.json"
+        mesh_manifest_path = job_dir / "mesh" / "mesh_manifest.json"
+        solver_run_manifest_path = job_dir / "results" / "solver_run_manifest.json"
+        snapshot_ref_path = job_dir / "snapshot_ref.json"
+        normalization_summary = self._read_json_file(normalization_manifest_path)
+        normalized_manifest = self._read_json_file(normalized_manifest_path)
+        mesh_summary = self._read_json_file(mesh_manifest_path)
+        solver_run_summary = self._read_json_file(solver_run_manifest_path)
+        snapshot_ref = self._read_json_file(snapshot_ref_path)
+        started_at = solver_run_summary.get("started_at")
+        finished_at = solver_run_summary.get("finished_at")
+        runtime_duration_seconds: float | None = None
+        if isinstance(started_at, str) and isinstance(finished_at, str):
+            try:
+                start = datetime.fromisoformat(started_at.replace("Z", "+00:00"))
+                end = datetime.fromisoformat(finished_at.replace("Z", "+00:00"))
+                runtime_duration_seconds = max((end - start).total_seconds(), 0.0)
+            except ValueError:
+                runtime_duration_seconds = None
         summary_payload = {
             "job_id": job_id,
+            "preflight_id": snapshot_ref.get("preflight_id"),
+            "source_file_name": snapshot_ref.get("source_file_name"),
+            "normalized_geometry_hash": self.compute_sha256(job_dir / "normalized" / "geometry" / "body_normalized.stl")
+            if (job_dir / "normalized" / "geometry" / "body_normalized.stl").exists()
+            else None,
+            "selected_solver": normalized_manifest.get("selected_solver"),
+            "execution_mode": normalized_manifest.get("execution_mode"),
+            "ai_assist_mode": normalized_manifest.get("ai_assist_mode"),
+            "physics_grade": "stable_trend_grade",
+            "mesh_strategy": "box_farfield",
             "coefficients": results.coefficients,
             "residual_history_points": len(results.residual_history),
             "warnings": results.warnings,
             "solver_log_path": str(results.solver_log_path),
+            "normalization_manifest": str(normalization_manifest_path) if normalization_manifest_path.exists() else None,
+            "mesh_manifest": str(mesh_manifest_path) if mesh_manifest_path.exists() else None,
+            "solver_run_manifest": str(solver_run_manifest_path) if solver_run_manifest_path.exists() else None,
+            "residual_history": str(results.residual_history_path),
+            "runtime_duration_seconds": runtime_duration_seconds,
+            "normalization_summary": normalization_summary,
+            "mesh_summary": mesh_summary,
+            "solver_run_summary": solver_run_summary,
+            "caveats": [
+                "Stable trend-grade external SU2 path.",
+                "Euler wall/farfield setup only in this release.",
+                "Boundary layer resolution, viscous wall treatment, and full field rendering are deferred.",
+            ],
         }
         summary_path.write_text(json_dumps(summary_payload), encoding="utf-8")
         report_path.write_text(
@@ -524,7 +716,17 @@ class CFDCore:
                     "<head><meta charset=\"utf-8\" /><title>Aero Agent Report</title></head>",
                     "<body>",
                     f"<h1>Aero Agent Report for {job_id}</h1>",
-                    "<p>This report is generated from actual pipeline artifacts and does not claim full field rendering.</p>",
+                    "<p>This report is generated from actual pipeline artifacts. It is a stable trend-grade external SU2 path and does not claim full field rendering or engineering-grade viscous fidelity.</p>",
+                    "<h2>Normalization</h2>",
+                    f"<p>Canonical unit: {normalization_summary.get('canonical_unit', 'm')}</p>",
+                    f"<p>Scale factor: {normalization_summary.get('scale_factor_to_meter', 'n/a')}</p>",
+                    f"<p>Axis mapping: {json.dumps(normalization_summary.get('axis_mapping', {}), ensure_ascii=True)}</p>",
+                    "<h2>External Mesh</h2>",
+                    f"<p>Strategy: {mesh_summary.get('mesh_strategy', 'box_farfield')}</p>",
+                    f"<p>Farfield extents: {json.dumps(mesh_summary.get('farfield_extents', {}), ensure_ascii=True)}</p>",
+                    f"<p>Selected solver: {normalized_manifest.get('selected_solver', 'su2')}</p>",
+                    f"<p>Execution mode: {normalized_manifest.get('execution_mode', 'real')}</p>",
+                    f"<p>AI assist mode: {normalized_manifest.get('ai_assist_mode', 'unknown')}</p>",
                     "<h2>Coefficients</h2>",
                     "<ul>",
                     f"<li>CL: {results.coefficients.get('CL', 0.0):.6f}</li>",
@@ -533,9 +735,11 @@ class CFDCore:
                     "</ul>",
                     "<h2>Residual History</h2>",
                     f"<p>Points captured: {len(results.residual_history)}</p>",
+                    f"<p>Solver runtime: {solver_run_summary.get('runtime_backend', 'unknown')}</p>",
                     "<h2>Warnings</h2>",
                     "<ul>",
                     *(f"<li>{warning}</li>" for warning in results.warnings),
+                    "<li>Boundary layer resolution, viscous wall treatment, and RANS credibility are deferred in this release.</li>",
                     "</ul>",
                     "</body>",
                     "</html>",
@@ -559,13 +763,16 @@ class CFDCore:
         package_dir.mkdir(parents=True, exist_ok=True)
         archive_path = package_dir / "case_bundle.zip"
         with zipfile.ZipFile(archive_path, mode="w", compression=zipfile.ZIP_DEFLATED) as bundle:
-            for root_name in ("case", "mesh", "results", "report", "viewer", "logs"):
+            for root_name in ("case", "mesh", "results", "report", "viewer", "logs", "normalized"):
                 root = job_dir / root_name
                 if not root.exists():
                     continue
                 for path in root.rglob("*"):
                     if path.is_file():
                         bundle.write(path, arcname=str(path.relative_to(job_dir)))
+            snapshot_ref = job_dir / "snapshot_ref.json"
+            if snapshot_ref.exists():
+                bundle.write(snapshot_ref, arcname="snapshot_ref.json")
         return archive_path
 
     def build_artifacts(
@@ -592,6 +799,15 @@ class CFDCore:
             ArtifactRecord(kind=ArtifactKind.VIEWER_BUNDLE, path=viewer.index_path, size_bytes=Path(viewer.index_path).stat().st_size),
             ArtifactRecord(kind=ArtifactKind.CASE_BUNDLE, path=str(case_bundle), size_bytes=case_bundle.stat().st_size),
         ]
+        optional_artifacts = [
+            (ArtifactKind.NORMALIZATION_MANIFEST, results.coefficients_path.parent.parent / "normalized" / "normalization_manifest.json"),
+            (ArtifactKind.MESH_MANIFEST, results.coefficients_path.parent.parent / "mesh" / "mesh_manifest.json"),
+            (ArtifactKind.MESH_LOG, results.coefficients_path.parent.parent / "mesh" / "gmsh.log"),
+            (ArtifactKind.SOLVER_RUN_MANIFEST, results.coefficients_path.parent / "solver_run_manifest.json"),
+        ]
+        for kind, path in optional_artifacts:
+            if path.exists():
+                artifacts.append(ArtifactRecord(kind=kind, path=str(path), size_bytes=path.stat().st_size))
         if report.json_path:
             artifacts.append(
                 ArtifactRecord(kind=ArtifactKind.SUMMARY, path=str(report.json_path), size_bytes=Path(report.json_path).stat().st_size)
@@ -636,6 +852,8 @@ class CFDCore:
             blockers.append("Reference area must be provided and positive.")
         if request.frame is None:
             blockers.append("Frame specification is required.")
+        elif request.frame.forward_axis == request.frame.up_axis:
+            blockers.append("Forward axis and up axis must be different.")
         if request.flow.velocity is None and request.flow.mach is None:
             blockers.append("Either velocity or Mach must be provided.")
         return blockers
@@ -655,33 +873,238 @@ class CFDCore:
 
     def _build_su2_config(self, request: AnalysisRequest, mesh_filename: str) -> str:
         mach = request.flow.mach if request.flow.mach is not None else 0.18
-        velocity = request.flow.velocity if request.flow.velocity is not None else 50.0
         aoa = request.flow.aoa
         sideslip = request.flow.sideslip
         ref_area = request.reference_values.area if request.reference_values else 1.0
         ref_length = request.reference_values.length if request.reference_values and request.reference_values.length else 1.0
-        density = request.flow.density if request.flow.density is not None else 1.225
-        viscosity = request.flow.viscosity if request.flow.viscosity is not None else 1.8e-5
+        iter_count = {"fast": 200, "balanced": 400, "high": 700}.get(request.fidelity, 400)
+        cfl = {"fast": 1.5, "balanced": 1.0, "high": 0.7}.get(request.fidelity, 1.0)
+        moment_center = request.frame.moment_center if request.frame and request.frame.moment_center else (0.0, 0.0, 0.0)
         return "\n".join(
             [
-                "SOLVER= RANS",
-                "KIND_TURB_MODEL= SA",
+                "SOLVER= EULER",
                 "MATH_PROBLEM= DIRECT",
                 "RESTART_SOL= NO",
+                "SYSTEM_MEASUREMENTS= SI",
                 f"MACH_NUMBER= {mach}",
-                f"FREESTREAM_VELOCITY= {velocity}",
                 f"AOA= {aoa}",
                 f"SIDESLIP_ANGLE= {sideslip}",
-                f"FREESTREAM_DENSITY= {density}",
-                f"FREESTREAM_VISCOSITY= {viscosity}",
                 f"REF_AREA= {ref_area}",
                 f"REF_LENGTH= {ref_length}",
+                f"REF_ORIGIN_MOMENT_X= {moment_center[0]}",
+                f"REF_ORIGIN_MOMENT_Y= {moment_center[1]}",
+                f"REF_ORIGIN_MOMENT_Z= {moment_center[2]}",
                 f"MESH_FILENAME= {mesh_filename}",
+                "MARKER_EULER= ( body )",
+                "MARKER_MONITORING= ( body )",
+                "MARKER_PLOTTING= ( body )",
+                "MARKER_FAR= ( farfield )",
                 "CONV_NUM_METHOD_FLOW= JST",
                 "TIME_DISCRE_FLOW= EULER_IMPLICIT",
-                "INNER_ITER= 250",
+                f"CFL_NUMBER= {cfl}",
+                f"ITER= {iter_count}",
+                "CONV_FIELD= RMS_DENSITY",
+                "CONV_RESIDUAL_MINVAL= -6",
+                "CONV_STARTITER= 10",
+                "TABULAR_FORMAT= CSV",
                 "CONV_FILENAME= history",
-                "OUTPUT_FILES= (RESTART,PARAVIEW)",
+                "OUTPUT_FILES= (RESTART, PARAVIEW, SURFACE_CSV)",
+            ]
+        ) + "\n"
+
+    def _load_triangle_mesh(self, path: Path) -> TriangleMesh:
+        suffix = path.suffix.lower()
+        if suffix == ".stl":
+            return self._load_stl(path)
+        if suffix == ".obj":
+            return self._load_obj(path)
+        if suffix in {".step", ".stp"}:
+            return self._load_step_via_gmsh(path)
+        raise RuntimeError(f"Unsupported geometry format for normalization: {suffix or 'unknown'}")
+
+    def _normalize_mesh(
+        self,
+        mesh: TriangleMesh,
+        *,
+        request: AnalysisRequest,
+        source_file_path: Path,
+    ) -> tuple[TriangleMesh, dict[str, object]]:
+        scale_factor = {
+            "m": 1.0,
+            "cm": 0.01,
+            "mm": 0.001,
+            "in": 0.0254,
+            "ft": 0.3048,
+        }[request.unit]
+        frame = request.frame
+        if frame is None:
+            raise RuntimeError("Frame specification is required for normalization.")
+        if frame.forward_axis == frame.up_axis:
+            raise RuntimeError("Forward axis and up axis must be different for normalization.")
+
+        side_axis = self._remaining_axis(frame.forward_axis, frame.up_axis)
+        axis_indices = {"x": 0, "y": 1, "z": 2}
+        order = (
+            axis_indices[frame.forward_axis],
+            axis_indices[side_axis],
+            axis_indices[frame.up_axis],
+        )
+
+        normalized_vertices: list[tuple[float, float, float]] = []
+        for vertex in mesh.vertices:
+            components = (vertex[0], vertex[1], vertex[2])
+            normalized_vertices.append(
+                self._round_vertex(
+                    (
+                        components[order[0]] * scale_factor,
+                        components[order[1]] * scale_factor,
+                        components[order[2]] * scale_factor,
+                    )
+                )
+            )
+
+        summary = {
+            "source_file": str(source_file_path),
+            "scale_factor": scale_factor,
+            "axis_mapping": {
+                "forward_to": "+X",
+                "up_to": "+Z",
+                "side_to": "+Y",
+                "source_forward_axis": frame.forward_axis,
+                "source_up_axis": frame.up_axis,
+                "source_side_axis": side_axis,
+            },
+            "caveats": [
+                "Canonical solver geometry is meter-based and uses positive-axis permutations only.",
+                "Symmetry-plane execution is deferred; this release always builds a full-domain farfield box.",
+            ],
+        }
+        return TriangleMesh(vertices=normalized_vertices, faces=list(mesh.faces)), summary
+
+    def _write_binary_stl(self, path: Path, mesh: TriangleMesh) -> None:
+        header = b"AeroAgent normalized geometry".ljust(80, b" ")
+        with path.open("wb") as stream:
+            stream.write(header)
+            stream.write(struct.pack("<I", len(mesh.faces)))
+            for face in mesh.faces:
+                normal = self._triangle_normal(
+                    mesh.vertices[face[0]],
+                    mesh.vertices[face[1]],
+                    mesh.vertices[face[2]],
+                )
+                stream.write(struct.pack("<fff", *normal))
+                for index in face:
+                    stream.write(struct.pack("<fff", *mesh.vertices[index]))
+                stream.write(struct.pack("<H", 0))
+
+    def _triangle_normal(
+        self,
+        a: tuple[float, float, float],
+        b: tuple[float, float, float],
+        c: tuple[float, float, float],
+    ) -> tuple[float, float, float]:
+        ux, uy, uz = (b[0] - a[0], b[1] - a[1], b[2] - a[2])
+        vx, vy, vz = (c[0] - a[0], c[1] - a[1], c[2] - a[2])
+        nx = uy * vz - uz * vy
+        ny = uz * vx - ux * vz
+        nz = ux * vy - uy * vx
+        length = math.sqrt(nx * nx + ny * ny + nz * nz)
+        if length == 0:
+            return (0.0, 0.0, 0.0)
+        return (nx / length, ny / length, nz / length)
+
+    def _bbox_from_vertices(
+        self,
+        vertices: list[tuple[float, float, float]],
+    ) -> tuple[float, float, float, float, float, float] | None:
+        if not vertices:
+            return None
+        xs = [vertex[0] for vertex in vertices]
+        ys = [vertex[1] for vertex in vertices]
+        zs = [vertex[2] for vertex in vertices]
+        return (min(xs), min(ys), min(zs), max(xs), max(ys), max(zs))
+
+    def _remaining_axis(self, forward_axis: str, up_axis: str) -> str:
+        for axis in ("x", "y", "z"):
+            if axis not in {forward_axis, up_axis}:
+                return axis
+        raise RuntimeError("Unable to derive side axis from frame definition.")
+
+    def _farfield_extents(
+        self,
+        bbox: tuple[float, float, float, float, float, float],
+    ) -> dict[str, float]:
+        xmin, ymin, zmin, xmax, ymax, zmax = bbox
+        length = max(xmax - xmin, ymax - ymin, zmax - zmin, 1e-6)
+        return {
+            "xmin": xmin - 10.0 * length,
+            "xmax": xmax + 20.0 * length,
+            "ymin": ymin - 10.0 * length,
+            "ymax": ymax + 10.0 * length,
+            "zmin": zmin - 10.0 * length,
+            "zmax": zmax + 10.0 * length,
+            "characteristic_length": length,
+        }
+
+    def _mesh_sizing_from_bbox(
+        self,
+        bbox: tuple[float, float, float, float, float, float],
+        *,
+        fidelity: str = "balanced",
+    ) -> dict[str, float]:
+        length = self._farfield_extents(bbox)["characteristic_length"]
+        if fidelity == "fast":
+            body = max(length / 8.0, 1e-4)
+            far = max(length / 2.0, body)
+        elif fidelity == "high":
+            body = max(length / 18.0, 1e-4)
+            far = max(length / 1.2, body)
+        else:
+            body = max(length / 12.0, 1e-4)
+            far = max(length / 1.8, body)
+        return {
+            "body_size": body,
+            "farfield_size": far,
+            "transition_distance": 4.0 * length,
+        }
+
+    def _build_farfield_geo(
+        self,
+        *,
+        case_manifest: CaseManifest,
+        bbox: tuple[float, float, float, float, float, float],
+    ) -> str:
+        extents = self._farfield_extents(bbox)
+        sizes = self._mesh_sizing_from_bbox(bbox, fidelity=case_manifest.fidelity)
+        geometry_name = case_manifest.geometry_path.name.replace("\\", "/")
+        mesh_name = case_manifest.mesh_path.name.replace("\\", "/")
+        return "\n".join(
+            [
+                'SetFactory("OpenCASCADE");',
+                f'Merge "{geometry_name}";',
+                "angle = 40*Pi/180;",
+                "ClassifySurfaces{angle, 1, 1, Pi};",
+                "CreateGeometry;",
+                "body_surfaces[] = Surface{:};",
+                "Surface Loop(1) = {body_surfaces[]};",
+                "Volume(1) = {1};",
+                f'Box(2) = {{{extents["xmin"]}, {extents["ymin"]}, {extents["zmin"]}, {extents["xmax"] - extents["xmin"]}, {extents["ymax"] - extents["ymin"]}, {extents["zmax"] - extents["zmin"]}}};',
+                "farfield_surfaces[] = Boundary{ Volume{2}; };",
+                "fluid[] = BooleanDifference{ Volume{2}; Delete; }{ Volume{1}; Delete; };",
+                "Physical Surface(\"body\") = {body_surfaces[]};",
+                "Physical Surface(\"farfield\") = {farfield_surfaces[]};",
+                "Physical Volume(\"fluid\") = {fluid[]};",
+                "Field[1] = Distance;",
+                "Field[1].SurfacesList = {body_surfaces[]};",
+                "Field[2] = Threshold;",
+                "Field[2].IField = 1;",
+                f'Field[2].LcMin = {sizes["body_size"]};',
+                f'Field[2].LcMax = {sizes["farfield_size"]};',
+                "Field[2].DistMin = 0.0;",
+                f'Field[2].DistMax = {sizes["transition_distance"]};',
+                "Background Field = 2;",
+                "Mesh.Algorithm3D = 4;",
+                f'Save "{mesh_name}";',
             ]
         ) + "\n"
 
@@ -825,9 +1248,13 @@ class CFDCore:
                     default=0.0,
                 )
                 point = {"iteration": float(iteration), "residual": float(residual)}
-                cl = self._parse_float(normalized, ["CL", "cl"], default=math.nan)
-                cd = self._parse_float(normalized, ["CD", "cd"], default=math.nan)
-                cm = self._parse_float(normalized, ["CMz", "CM", "Cm", "cm"], default=math.nan)
+                cl = self._parse_float(normalized, ["CL", "cl", "LIFT", "Lift", "CLift", "C_l"], default=math.nan)
+                cd = self._parse_float(normalized, ["CD", "cd", "DRAG", "Drag", "CDrag", "C_d"], default=math.nan)
+                cm = self._parse_float(
+                    normalized,
+                    ["CMz", "CM", "Cm", "cm", "MOMENT_Z", "Moment_Z", "C_m"],
+                    default=math.nan,
+                )
                 if math.isfinite(cl):
                     point["CL"] = cl
                     coefficients["CL"] = cl
@@ -867,6 +1294,15 @@ class CFDCore:
             if candidate.exists():
                 return candidate
         return None
+
+    def _read_json_file(self, path: Path) -> dict[str, object]:
+        if not path.exists():
+            return {}
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return {}
+        return payload if isinstance(payload, dict) else {}
 
     def _materialize_file(self, source: Path, target: Path) -> None:
         target.parent.mkdir(parents=True, exist_ok=True)

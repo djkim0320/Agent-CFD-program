@@ -59,12 +59,15 @@ class Repository:
                     source_file_name TEXT NOT NULL,
                     source_file_relpath TEXT NOT NULL,
                     normalized_manifest_relpath TEXT NOT NULL,
+                    normalization_manifest_relpath TEXT NOT NULL DEFAULT '',
+                    normalized_geometry_relpath TEXT NOT NULL DEFAULT '',
                     preflight_plan_relpath TEXT NOT NULL,
                     subagent_findings_relpath TEXT NOT NULL,
                     request_json TEXT NOT NULL,
                     request_digest TEXT NOT NULL,
                     source_hash TEXT NOT NULL,
                     normalized_manifest_hash TEXT NOT NULL,
+                    normalized_geometry_hash TEXT NOT NULL DEFAULT '',
                     selected_solver TEXT NOT NULL,
                     execution_mode TEXT NOT NULL,
                     ai_assist_mode TEXT NOT NULL,
@@ -121,6 +124,7 @@ class Repository:
                 """
             )
             self._ensure_job_columns(conn)
+            self._ensure_snapshot_columns(conn)
 
     def _ensure_job_columns(self, conn: sqlite3.Connection) -> None:
         existing = {row["name"] for row in conn.execute("PRAGMA table_info(jobs)").fetchall()}
@@ -139,6 +143,17 @@ class Repository:
         for column, ddl in required.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE jobs ADD COLUMN {column} {ddl}")
+
+    def _ensure_snapshot_columns(self, conn: sqlite3.Connection) -> None:
+        existing = {row["name"] for row in conn.execute("PRAGMA table_info(preflight_snapshots)").fetchall()}
+        required = {
+            "normalization_manifest_relpath": "TEXT NOT NULL DEFAULT ''",
+            "normalized_geometry_relpath": "TEXT NOT NULL DEFAULT ''",
+            "normalized_geometry_hash": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, ddl in required.items():
+            if column not in existing:
+                conn.execute(f"ALTER TABLE preflight_snapshots ADD COLUMN {column} {ddl}")
 
     def upsert_connection(self, connection: ConnectionRecord) -> ConnectionRecord:
         with self.connect() as conn:
@@ -184,12 +199,13 @@ class Repository:
                 """
                 INSERT INTO preflight_snapshots (
                     id, connection_id, status, source_file_name, source_file_relpath,
-                    normalized_manifest_relpath, preflight_plan_relpath, subagent_findings_relpath,
-                    request_json, request_digest, source_hash, normalized_manifest_hash,
+                    normalized_manifest_relpath, normalization_manifest_relpath, normalized_geometry_relpath,
+                    preflight_plan_relpath, subagent_findings_relpath,
+                    request_json, request_digest, source_hash, normalized_manifest_hash, normalized_geometry_hash,
                     selected_solver, execution_mode, ai_assist_mode, runtime_blockers_json,
                     install_warnings_json, ai_warnings_json, policy_warnings_json,
                     created_at, expires_at, consumed_by_job_id, consumed_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot.id,
@@ -198,12 +214,15 @@ class Repository:
                     snapshot.source_file_name,
                     snapshot.source_file_relpath,
                     snapshot.normalized_manifest_relpath,
+                    snapshot.normalization_manifest_relpath,
+                    snapshot.normalized_geometry_relpath,
                     snapshot.preflight_plan_relpath,
                     snapshot.subagent_findings_relpath,
                     snapshot.request.model_dump_json(),
                     snapshot.request_digest,
                     snapshot.source_hash,
                     snapshot.normalized_manifest_hash,
+                    snapshot.normalized_geometry_hash,
                     snapshot.selected_solver.value,
                     snapshot.execution_mode.value,
                     snapshot.ai_assist_mode.value,
@@ -234,12 +253,15 @@ class Repository:
                     source_file_name=?,
                     source_file_relpath=?,
                     normalized_manifest_relpath=?,
+                    normalization_manifest_relpath=?,
+                    normalized_geometry_relpath=?,
                     preflight_plan_relpath=?,
                     subagent_findings_relpath=?,
                     request_json=?,
                     request_digest=?,
                     source_hash=?,
                     normalized_manifest_hash=?,
+                    normalized_geometry_hash=?,
                     selected_solver=?,
                     execution_mode=?,
                     ai_assist_mode=?,
@@ -259,12 +281,15 @@ class Repository:
                     snapshot.source_file_name,
                     snapshot.source_file_relpath,
                     snapshot.normalized_manifest_relpath,
+                    snapshot.normalization_manifest_relpath,
+                    snapshot.normalized_geometry_relpath,
                     snapshot.preflight_plan_relpath,
                     snapshot.subagent_findings_relpath,
                     snapshot.request.model_dump_json(),
                     snapshot.request_digest,
                     snapshot.source_hash,
                     snapshot.normalized_manifest_hash,
+                    snapshot.normalized_geometry_hash,
                     snapshot.selected_solver.value,
                     snapshot.execution_mode.value,
                     snapshot.ai_assist_mode.value,
@@ -454,12 +479,15 @@ class Repository:
             source_file_name=row["source_file_name"],
             source_file_relpath=row["source_file_relpath"],
             normalized_manifest_relpath=row["normalized_manifest_relpath"],
+            normalization_manifest_relpath=row["normalization_manifest_relpath"],
+            normalized_geometry_relpath=row["normalized_geometry_relpath"],
             preflight_plan_relpath=row["preflight_plan_relpath"],
             subagent_findings_relpath=row["subagent_findings_relpath"],
             request=AnalysisRequest.model_validate_json(row["request_json"]),
             request_digest=row["request_digest"],
             source_hash=row["source_hash"],
             normalized_manifest_hash=row["normalized_manifest_hash"],
+            normalized_geometry_hash=row["normalized_geometry_hash"],
             selected_solver=row["selected_solver"],
             execution_mode=ExecutionMode(row["execution_mode"]),
             ai_assist_mode=AIAssistMode(row["ai_assist_mode"]),

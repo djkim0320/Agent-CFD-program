@@ -119,9 +119,13 @@ class ArtifactKind(StrEnum):
     SUMMARY = "summary"
     PREVIEW = "preview"
     SOLVER_LOG = "solver_log"
+    MESH_LOG = "mesh_log"
     RESIDUAL_HISTORY = "residual_history"
     COEFFICIENTS = "coefficients"
     CASE_BUNDLE = "case_bundle"
+    MESH_MANIFEST = "mesh_manifest"
+    NORMALIZATION_MANIFEST = "normalization_manifest"
+    SOLVER_RUN_MANIFEST = "solver_run_manifest"
 
 
 class FlowCondition(BaseModel):
@@ -235,6 +239,21 @@ class SubagentFindings(BaseModel):
     geometry_triage: GeometryTriageFinding
     solver_planner: SolverPlannerFinding
     auth_and_policy_reviewer: AuthPolicyFinding
+
+
+class NormalizationSummary(BaseModel):
+    source_format: str | None = None
+    declared_unit: str
+    canonical_unit: str = "m"
+    scale_factor_to_meter: float
+    axis_mapping: dict[str, str] = Field(default_factory=dict)
+    source_bbox: tuple[float, float, float, float, float, float] | None = None
+    normalized_bbox: tuple[float, float, float, float, float, float] | None = None
+    face_count: int | None = None
+    component_count: int | None = None
+    watertight: bool | None = None
+    repair_actions: list[str] = Field(default_factory=list)
+    caveats: list[str] = Field(default_factory=list)
 
 
 class PreflightPlan(BaseModel):
@@ -392,12 +411,15 @@ class PreflightSnapshot(BaseModel):
     source_file_name: str
     source_file_relpath: str
     normalized_manifest_relpath: str
+    normalization_manifest_relpath: str | None = None
+    normalized_geometry_relpath: str | None = None
     preflight_plan_relpath: str
     subagent_findings_relpath: str
     request: AnalysisRequest
     request_digest: str
     source_hash: str
     normalized_manifest_hash: str
+    normalized_geometry_hash: str | None = None
     selected_solver: SolverKind
     execution_mode: ExecutionMode
     ai_assist_mode: AIAssistMode
@@ -424,6 +446,10 @@ class PreflightResponse(BaseModel):
     request_digest: str
     source_hash: str
     normalized_manifest_hash: str
+    normalized_geometry_hash: str | None = None
+    normalization_summary: NormalizationSummary | None = None
+    physics_grade: Literal["stable_trend_grade"] = "stable_trend_grade"
+    mesh_strategy: Literal["box_farfield"] = "box_farfield"
     runtime_estimate_minutes: int
     memory_estimate_gb: float
     confidence: float = 0.0

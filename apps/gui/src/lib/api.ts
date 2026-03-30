@@ -174,6 +174,20 @@ function normalizePreflightResponse(raw: unknown): PreflightResponse {
         : typeof record.normalizedManifestHash === "string"
           ? record.normalizedManifestHash
           : "",
+    normalized_geometry_hash:
+      typeof record.normalized_geometry_hash === "string"
+        ? record.normalized_geometry_hash
+        : typeof record.normalizedGeometryHash === "string"
+          ? record.normalizedGeometryHash
+          : "",
+    normalization_summary:
+      isRecord(record.normalization_summary)
+        ? (record.normalization_summary as Record<string, unknown>)
+        : isRecord(record.normalizationSummary)
+          ? (record.normalizationSummary as Record<string, unknown>)
+          : {},
+    physics_grade: "stable_trend_grade",
+    mesh_strategy: "box_farfield",
     runtime_estimate_minutes: runtimeEstimateMinutes,
     memory_estimate_gb: memoryEstimateGb,
     confidence: toNumber(record.confidence ?? record.confidence_score, 0),

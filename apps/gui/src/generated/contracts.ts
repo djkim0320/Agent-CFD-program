@@ -97,6 +97,10 @@ export interface PreflightResponse {
   request_digest: string;
   source_hash: string;
   normalized_manifest_hash: string;
+  normalized_geometry_hash: string;
+  normalization_summary: Record<string, unknown>;
+  physics_grade: "stable_trend_grade";
+  mesh_strategy: "box_farfield";
   runtime_estimate_minutes: number;
   memory_estimate_gb: number;
   confidence: number;
