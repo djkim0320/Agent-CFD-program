@@ -1,3 +1,3 @@
-from .adapters import SolverAdapterRegistry, SolverProbeResult
+from .adapters import SolverAdapterRegistry, SolverProbeResult, SolverRuntimeHandle
 
-__all__ = ["SolverAdapterRegistry", "SolverProbeResult"]
+__all__ = ["SolverAdapterRegistry", "SolverProbeResult", "SolverRuntimeHandle"]

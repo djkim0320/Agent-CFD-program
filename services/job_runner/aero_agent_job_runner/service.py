@@ -1,195 +1,343 @@
 from __future__ import annotations
 
-import json
-import time
+from dataclasses import dataclass
+from dataclasses import field
 from datetime import UTC, datetime
 from pathlib import Path
+import queue
+import threading
 from typing import Any
 
-from pydantic import BaseModel
+from aero_agent_cfd_core import CFDCore, CFDResults, CaseManifest
+from aero_agent_contracts import (
+    EventType,
+    JobEventRecord,
+    JobRecord,
+    JobStatus,
+    PreflightSnapshot,
+    ReportManifest,
+    SnapshotStatus,
+    ViewerManifest,
+)
+from aero_agent_solver_adapters import SolverRuntimeHandle
 
-from .contracts import JobExecutionContext
+
+def utc_now() -> datetime:
+    return datetime.now(UTC)
 
 
-class RunnerResult(BaseModel):
-    selected_solver: str
-    rationale: str
-    metrics: dict[str, Any]
-    warnings: list[str] = []
-    artifacts: list[dict[str, Any]] = []
-    report_path: str
-    summary_path: str
+@dataclass(slots=True)
+class ActiveRun:
+    job_id: str
+    phase: str
+    solver_handle: SolverRuntimeHandle | None = None
+    cancel_requested: bool = False
+    started_at: datetime = field(default_factory=utc_now)
 
 
 class JobExecutionService:
-    def __init__(self, cfd_core: Any, provider_router: Any, artifact_builder: Any):
+    def __init__(self, repository: Any, broker: Any, cfd_core: CFDCore, data_dir: Path):
+        self.repository = repository
+        self.broker = broker
         self.cfd_core = cfd_core
-        self.provider_router = provider_router
-        self.artifact_builder = artifact_builder
+        self.data_dir = data_dir
+        self._queue: queue.Queue[str | None] = queue.Queue()
+        self._thread: threading.Thread | None = None
+        self._stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._active_runs: dict[str, ActiveRun] = {}
 
-    def run_preflight(self, context: JobExecutionContext) -> dict[str, Any]:
-        inspection = self.cfd_core.inspect_geometry(context.source_file_path)
-        plan = self.provider_router.select_solver(context.request, inspection)
-        plan["geometry"] = inspection
-        return plan
+    def start(self) -> None:
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._worker_loop, name="aero-agent-worker", daemon=True)
+        self._thread.start()
 
-    def run_execution(self, context: JobExecutionContext, approval: bool = True) -> RunnerResult:
-        if not approval:
-            raise ValueError("approval required before execution")
-        self._ensure_dirs(context.job_dir)
-        mesh_result = self.cfd_core.generate_case(context.job_dir, context.request)
-        solver_result = self.cfd_core.run_solver(context.job_dir, mesh_result["selected_solver"])
-        postprocess = self.cfd_core.postprocess(context.job_dir, solver_result)
-        artifacts = self.artifact_builder.package(context.job_dir, postprocess)
-        return RunnerResult(
-            selected_solver=mesh_result["selected_solver"],
-            rationale=mesh_result["rationale"],
-            metrics=postprocess["metrics"],
-            warnings=postprocess.get("warnings", []),
-            artifacts=artifacts.get("artifacts", []),
-            report_path=postprocess["report_path"],
-            summary_path=postprocess["summary_path"],
+    def shutdown(self) -> None:
+        self._stop_event.set()
+        self._queue.put(None)
+        if self._thread and self._thread.is_alive():
+            self._thread.join(timeout=5)
+
+    def recover_interrupted_jobs(self) -> None:
+        for job in self.repository.list_jobs():
+            if job.status not in {JobStatus.QUEUED, JobStatus.RUNNING, JobStatus.POSTPROCESSING}:
+                continue
+            job.status = JobStatus.FAILED
+            job.error = "Interrupted during application shutdown; rerun required."
+            job.failed_at = utc_now()
+            self._persist_job_and_event(
+                job,
+                EventType.JOB_FAILED,
+                {"message": job.error, "status": job.status.value},
+            )
+
+    def enqueue(self, job_id: str) -> None:
+        self._queue.put(job_id)
+
+    def request_cancel(self, job_id: str) -> None:
+        with self._lock:
+            active = self._active_runs.get(job_id)
+            if not active:
+                return
+            active.cancel_requested = True
+            handle = active.solver_handle
+        if handle is not None:
+            self.cfd_core.terminate_solver(handle)
+
+    def _worker_loop(self) -> None:
+        while not self._stop_event.is_set():
+            try:
+                job_id = self._queue.get(timeout=0.25)
+            except queue.Empty:
+                continue
+
+            if job_id is None:
+                self._queue.task_done()
+                continue
+
+            try:
+                self._run_job(job_id)
+            finally:
+                self._queue.task_done()
+
+    def _run_job(self, job_id: str) -> None:
+        job = self.repository.get_job(job_id)
+        if not job:
+            return
+        if job.status == JobStatus.CANCELLED:
+            return
+
+        snapshot = self.repository.get_preflight_snapshot(job.preflight_snapshot_id)
+        if snapshot is None:
+            self._fail_job(job, "Referenced preflight snapshot was not found.")
+            return
+
+        try:
+            self._verify_snapshot(snapshot)
+            self._consume_snapshot(snapshot, job.id)
+            job.started_at = utc_now()
+            job.status = JobStatus.RUNNING
+            job.progress = 15
+            self._persist_job_and_event(job, EventType.JOB_STATUS, {"status": job.status.value, "progress": job.progress})
+
+            job_dir = self._job_dir(job.id)
+            snapshot_dir = self._snapshot_dir(snapshot.id)
+            source_path, normalized_manifest_path = self.cfd_core.materialize_snapshot(
+                snapshot_dir,
+                job_dir,
+                source_file_name=snapshot.source_file_name,
+            )
+
+            with self._lock:
+                self._active_runs[job.id] = ActiveRun(job_id=job.id, phase="prepare_case")
+
+            case_manifest = self._prepare_case(job, job_dir, source_path, normalized_manifest_path)
+            self._check_cancel(job)
+            self._generate_mesh(job, case_manifest)
+            self._check_cancel(job)
+            run_manifest = self._run_solver(job, case_manifest)
+            self._check_cancel(job)
+            results, report, viewer, artifacts = self._postprocess(job, job_dir, run_manifest)
+            self._complete_job(job, results, artifacts)
+            self._emit_artifact_events(job.id, artifacts, report)
+            self._persist_event(
+                job.id,
+                EventType.JOB_COMPLETED,
+                {"status": job.status.value, "progress": job.progress, "message": "Analysis completed."},
+            )
+        except CancelledError as exc:
+            current = self.repository.get_job(job.id) or job
+            current.status = JobStatus.CANCELLED
+            current.cancelled_at = utc_now()
+            current.error = str(exc)
+            self._persist_job_and_event(
+                current,
+                EventType.JOB_CANCELLED,
+                {"message": str(exc), "status": current.status.value},
+            )
+        except Exception as exc:  # pragma: no cover - runtime guard
+            current = self.repository.get_job(job.id) or job
+            current.status = JobStatus.FAILED
+            current.failed_at = utc_now()
+            current.error = str(exc)
+            self._persist_job_and_event(
+                current,
+                EventType.JOB_FAILED,
+                {"message": str(exc), "status": current.status.value},
+            )
+        finally:
+            with self._lock:
+                self._active_runs.pop(job.id, None)
+
+    def _prepare_case(
+        self,
+        job: JobRecord,
+        job_dir: Path,
+        source_path: Path,
+        normalized_manifest_path: Path,
+    ) -> CaseManifest:
+        job.progress = 25
+        self._persist_job_and_event(
+            job,
+            EventType.TOOL_STARTED,
+            {"tool": "case.prepare", "progress": job.progress, "message": "Preparing SU2 case files."},
         )
-
-    def retry_once(self, context: JobExecutionContext) -> dict[str, Any]:
-        return {
-            "retry": True,
-            "timestamp": datetime.now(UTC).isoformat(),
-            "job_id": context.job_id,
-        }
-
-    def _ensure_dirs(self, job_dir: Path) -> None:
-        for relative in ["case", "mesh", "results", "report", "viewer", "logs", "package"]:
-            (job_dir / relative).mkdir(parents=True, exist_ok=True)
-
-
-class DefaultProviderRouter:
-    def select_solver(self, request: dict[str, Any], inspection: dict[str, Any]) -> dict[str, Any]:
-        geometry_kind = request.get("geometry_kind", "general_3d")
-        solver_preference = request.get("solver_preference", "auto")
-        if solver_preference != "auto":
-            selected = solver_preference
-            rationale = f"User override selected {selected}."
-        elif geometry_kind == "aircraft_vsp":
-            selected = "vspaero"
-            rationale = "Aircraft .vsp3 geometry fits VSPAERO best."
-        else:
-            selected = "su2"
-            rationale = "General 3D geometry defaults to SU2 for balanced external aerodynamics."
-        return {
-            "selected_solver": selected,
-            "rationale": rationale,
-            "runtime_estimate_minutes": 20 if selected == "su2" else 10,
-            "memory_estimate_gb": 4.0 if selected == "su2" else 2.0,
-            "warnings": inspection.get("warnings", []),
-        }
-
-
-class DefaultCfdCore:
-    def inspect_geometry(self, source_file_path: Path) -> dict[str, Any]:
-        suffix = source_file_path.suffix.lower()
-        geometry_kind = "aircraft_vsp" if suffix == ".vsp3" else "general_3d"
-        return {
-            "file_name": source_file_path.name,
-            "suffix": suffix,
-            "geometry_kind": geometry_kind,
-            "warnings": [],
-            "repairable": True,
-        }
-
-    def generate_case(self, job_dir: Path, request: dict[str, Any]) -> dict[str, Any]:
-        selected_solver = request.get("solver_preference", "auto")
-        if selected_solver == "auto":
-            selected_solver = "vspaero" if request.get("geometry_kind") == "aircraft_vsp" else "su2"
-        case_manifest = {
-            "selected_solver": selected_solver,
-            "request": request,
-            "created_at": datetime.now(UTC).isoformat(),
-        }
-        (job_dir / "case" / "case_manifest.json").write_text(
-            json.dumps(case_manifest, indent=2),
-            encoding="utf-8",
+        case_manifest = self.cfd_core.prepare_case(
+            job_id=job.id,
+            job_dir=job_dir,
+            request=job.request,
+            source_geometry_path=source_path,
+            normalized_manifest_path=normalized_manifest_path,
+            selected_solver=job.selected_solver,
         )
-        return {
-            "selected_solver": selected_solver,
-            "rationale": f"Selected {selected_solver} from request and geometry hints.",
-        }
+        self._persist_event(
+            job.id,
+            EventType.TOOL_COMPLETED,
+            {"tool": "case.prepare", "case_dir": str(case_manifest.case_dir)},
+        )
+        with self._lock:
+            if job.id in self._active_runs:
+                self._active_runs[job.id].phase = "mesh.generate"
+        return case_manifest
 
-    def run_solver(self, job_dir: Path, solver_kind: str) -> dict[str, Any]:
-        time.sleep(0.05)
-        run_manifest = {
-            "solver_kind": solver_kind,
-            "status": "completed",
-            "timestamp": datetime.now(UTC).isoformat(),
-        }
-        (job_dir / "results" / "solver_run.json").write_text(
-            json.dumps(run_manifest, indent=2),
-            encoding="utf-8",
+    def _generate_mesh(self, job: JobRecord, case_manifest: CaseManifest) -> None:
+        job.progress = 40
+        self._persist_job_and_event(
+            job,
+            EventType.TOOL_STARTED,
+            {"tool": "mesh.generate", "progress": job.progress, "message": "Generating mesh with gmsh."},
+        )
+        mesh_path = self.cfd_core.generate_mesh(case_manifest)
+        self._persist_event(
+            job.id,
+            EventType.TOOL_COMPLETED,
+            {"tool": "mesh.generate", "mesh_path": str(mesh_path)},
+        )
+        with self._lock:
+            if job.id in self._active_runs:
+                self._active_runs[job.id].phase = "solver.run"
+
+    def _run_solver(self, job: JobRecord, case_manifest: CaseManifest):
+        job.progress = 60
+        self._persist_job_and_event(
+            job,
+            EventType.TOOL_STARTED,
+            {"tool": "solver.run", "progress": job.progress, "message": "Running SU2 in Docker."},
+        )
+        handle = self.cfd_core.launch_solver(job_id=job.id, case_manifest=case_manifest)
+        with self._lock:
+            if job.id in self._active_runs:
+                self._active_runs[job.id].solver_handle = handle
+        run_manifest = self.cfd_core.wait_for_solver(handle)
+        if run_manifest.status != JobStatus.COMPLETED:
+            raise RuntimeError(f"Solver execution failed. Log: {run_manifest.logs_path}")
+        self._persist_event(
+            job.id,
+            EventType.SOLVER_STDOUT,
+            {"message": "Solver execution completed.", "logs_path": run_manifest.logs_path},
         )
         return run_manifest
 
-    def postprocess(self, job_dir: Path, solver_result: dict[str, Any]) -> dict[str, Any]:
-        report_path = job_dir / "report" / "report.html"
-        summary_path = job_dir / "report" / "summary.json"
-        viewer_index_path = job_dir / "viewer" / "index.html"
-        viewer_manifest_path = job_dir / "viewer" / "viewer_manifest.json"
-        report_path.write_text(
-            (
-                "<html><body><h1>Aero Analysis Report</h1>"
-                "<p>Mock deterministic pipeline output.</p>"
-                f"<p>Solver: {solver_result['solver_kind']}</p>"
-                "</body></html>"
-            ),
-            encoding="utf-8",
+    def _postprocess(
+        self,
+        job: JobRecord,
+        job_dir: Path,
+        run_manifest,
+    ) -> tuple[CFDResults, ReportManifest, ViewerManifest, list]:
+        job.status = JobStatus.POSTPROCESSING
+        job.progress = 82
+        self._persist_job_and_event(
+            job,
+            EventType.JOB_STATUS,
+            {"status": job.status.value, "progress": job.progress, "message": "Extracting results and building report."},
         )
-        summary = {
-            "solver": solver_result["solver_kind"],
-            "status": solver_result["status"],
-            "generated_at": datetime.now(UTC).isoformat(),
-        }
-        summary_path.write_text(json.dumps(summary, indent=2), encoding="utf-8")
-        viewer_index_path.write_text(
-            "<html><body><h1>Viewer Placeholder</h1><p>Deterministic viewer scaffold.</p></body></html>",
-            encoding="utf-8",
+        results = self.cfd_core.extract_results(job_dir=job_dir, run_manifest=run_manifest)
+        report = self.cfd_core.build_report(job_id=job.id, job_dir=job_dir, results=results)
+        viewer = self.cfd_core.build_viewer(job_id=job.id, job_dir=job_dir, results=results)
+        case_bundle = self.cfd_core.package_case_bundle(job_dir=job_dir)
+        artifacts = self.cfd_core.build_artifacts(results=results, report=report, viewer=viewer, case_bundle=case_bundle)
+        self._persist_event(
+            job.id,
+            EventType.SOLVER_METRICS,
+            {
+                "metrics": {metric.name: metric.value for metric in results.metrics},
+                "residual_history_points": len(results.residual_history),
+            },
         )
-        viewer_manifest_path.write_text(
-            json.dumps(
-                {
-                    "index_path": str(viewer_index_path),
-                    "assets": [str(viewer_index_path)],
-                    "scalars": ["pressure_coefficient", "velocity_magnitude"],
-                },
-                indent=2,
-            ),
-            encoding="utf-8",
+        return results, report, viewer, artifacts
+
+    def _complete_job(self, job: JobRecord, results: CFDResults, artifacts: list) -> None:
+        job.status = JobStatus.COMPLETED
+        job.progress = 100
+        job.completed_at = utc_now()
+        job.metrics = list(results.metrics)
+        job.artifacts = list(artifacts)
+        job.updated_at = utc_now()
+        self.repository.update_job(job)
+
+    def _emit_artifact_events(self, job_id: str, artifacts: list, report: ReportManifest) -> None:
+        for artifact in artifacts:
+            self._persist_event(
+                job_id,
+                EventType.ARTIFACT_READY,
+                {"artifact": artifact.model_dump(mode="json")},
+            )
+        self._persist_event(
+            job_id,
+            EventType.REPORT_READY,
+            {"report_path": report.html_path, "summary_path": report.json_path},
         )
-        return {
-            "metrics": {"lift_coefficient": 0.0, "drag_coefficient": 0.0},
-            "warnings": ["Deterministic scaffold output. Replace with real CFD pipeline."],
-            "report_path": str(report_path),
-            "summary_path": str(summary_path),
-            "viewer_index_path": str(viewer_index_path),
-            "viewer_manifest_path": str(viewer_manifest_path),
-        }
+
+    def _fail_job(self, job: JobRecord, message: str) -> None:
+        job.status = JobStatus.FAILED
+        job.failed_at = utc_now()
+        job.error = message
+        self._persist_job_and_event(job, EventType.JOB_FAILED, {"message": message, "status": job.status.value})
+
+    def _verify_snapshot(self, snapshot: PreflightSnapshot) -> None:
+        if snapshot.status == SnapshotStatus.EXPIRED:
+            raise RuntimeError("Preflight snapshot expired.")
+        snapshot_dir = self._snapshot_dir(snapshot.id)
+        if not snapshot_dir.exists():
+            raise RuntimeError("Preflight snapshot directory is missing.")
+
+    def _consume_snapshot(self, snapshot: PreflightSnapshot, job_id: str) -> None:
+        snapshot.status = SnapshotStatus.CONSUMED
+        snapshot.consumed_by_job_id = job_id
+        snapshot.consumed_at = utc_now()
+        self.repository.update_preflight_snapshot(snapshot)
+
+    def _check_cancel(self, job: JobRecord) -> None:
+        current = self.repository.get_job(job.id)
+        if current and current.cancel_requested_at:
+            raise CancelledError("Job cancelled by user.")
+
+    def _persist_job_and_event(self, job: JobRecord, event_type: EventType, payload: dict[str, Any]) -> None:
+        job.updated_at = utc_now()
+        self.repository.update_job(job)
+        self._persist_event(job.id, event_type, payload)
+
+    def _persist_event(self, job_id: str, event_type: EventType, payload: dict[str, Any]) -> None:
+        event = JobEventRecord(
+            job_id=job_id,
+            seq=self.repository.next_event_seq(job_id),
+            event_type=event_type,
+            payload=payload,
+            created_at=utc_now(),
+        )
+        stored = self.repository.add_event(event)
+        self.broker.publish_from_thread(job_id, stored.model_dump(mode="json"))
+
+    def _snapshot_dir(self, snapshot_id: str) -> Path:
+        return self.data_dir / "snapshots" / snapshot_id
+
+    def _job_dir(self, job_id: str) -> Path:
+        path = self.data_dir / "jobs" / job_id
+        path.mkdir(parents=True, exist_ok=True)
+        return path
 
 
-class DefaultArtifactBuilder:
-    def package(self, job_dir: Path, postprocess: dict[str, Any]) -> dict[str, Any]:
-        artifacts = [
-            {
-                "kind": "report",
-                "path": postprocess["report_path"],
-                "size_bytes": Path(postprocess["report_path"]).stat().st_size,
-            },
-            {
-                "kind": "summary",
-                "path": postprocess["summary_path"],
-                "size_bytes": Path(postprocess["summary_path"]).stat().st_size,
-            },
-            {
-                "kind": "viewer",
-                "path": postprocess["viewer_index_path"],
-                "size_bytes": Path(postprocess["viewer_index_path"]).stat().st_size,
-            },
-        ]
-        return {"artifacts": artifacts}
+class CancelledError(RuntimeError):
+    pass

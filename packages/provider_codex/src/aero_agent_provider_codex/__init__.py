@@ -1,3 +1,3 @@
-from .provider import CodexBackendChoice, CodexProviderAdapter
+from .provider import CodexBackendChoice, CodexProviderAdapter, ReadonlyPreflightResult
 
-__all__ = ["CodexBackendChoice", "CodexProviderAdapter"]
+__all__ = ["CodexBackendChoice", "CodexProviderAdapter", "ReadonlyPreflightResult"]
