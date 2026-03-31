@@ -535,6 +535,35 @@ def test_step_success_and_failure_branches(tmp_path, monkeypatch) -> None:
         assert success.json()["execution_mode"] == "real"
 
 
+def test_job_summary_includes_runtime_blocker_details(tmp_path, monkeypatch) -> None:
+    app, deps = reset_app(tmp_path, monkeypatch)
+    patch_runtime_ready(deps, monkeypatch)
+
+    with TestClient(app) as client:
+        preflight = client.post(
+            "/api/v1/jobs/preflight",
+            data=preflight_payload(),
+            files={"geometry_file": ("sample.step", b"ISO-10303-21;", "application/step")},
+        )
+        assert preflight.status_code == 200
+        payload = preflight.json()
+        assert payload["runtime_blockers"]
+        assert payload["runtime_blocker_details"]
+
+        job = client.post("/api/v1/jobs", json={"preflight_id": payload["preflight_id"]})
+        assert job.status_code == 200
+
+        summary = client.get(f"/api/v1/jobs/{job.json()['id']}")
+        assert summary.status_code == 200
+        summary_payload = summary.json()
+        assert summary_payload["runtime_blockers"]
+        blocker_details = summary_payload["runtime_blocker_details"]
+        assert isinstance(blocker_details, list)
+        assert blocker_details
+        blocker_codes = [item["code"] for item in blocker_details if isinstance(item, dict) and isinstance(item.get("code"), str)]
+        assert any(code in {"STEP_TESSELLATION_FAILED", "STEP_NORMALIZATION_UNSUPPORTED"} for code in blocker_codes)
+
+
 def test_snapshot_integrity_blocks_approve(tmp_path, monkeypatch) -> None:
     app, deps = reset_app(tmp_path, monkeypatch)
     patch_runtime_ready(deps, monkeypatch)
@@ -704,14 +733,96 @@ def test_job_lifecycle_to_completion(tmp_path, monkeypatch) -> None:
         while time.time() < deadline:
             history = client.get(f"/api/v1/jobs/{job['id']}/history")
             assert history.status_code == 200
-            event_types = [item["event_type"] for item in history.json()]
-            if "job.completed" in event_types:
+            history_payload = history.json()
+            event_types = [item["event_type"] for item in history_payload]
+            if "job.completed" in event_types and "report.ready" in event_types:
                 break
             time.sleep(0.1)
 
         assert "approval.required" in event_types
         assert "job.completed" in event_types
         assert "artifact.ready" in event_types
+        assert "report.ready" in event_types
+        event_payloads = {item["event_type"]: item.get("payload", {}) for item in history_payload if isinstance(item, dict)}
+        assert set(event_payloads["job.status"].keys()) >= {"status", "progress"}
+        assert set(event_payloads["solver.metrics"].keys()) >= {"metrics", "residual_history_points"}
+        assert set(event_payloads["artifact.ready"].keys()) == {"artifact"}
+        assert set(event_payloads["report.ready"].keys()) == {"report_path", "summary_path"}
+        if "job.failed" in event_payloads:
+            assert set(event_payloads["job.failed"].keys()) >= {"message", "status"}
+
+
+def test_load_residual_history_skips_malformed_rows(tmp_path, monkeypatch) -> None:
+    reset_app(tmp_path, monkeypatch)
+    import aero_agent_api.main as main_mod
+
+    history_path = tmp_path / "history.csv"
+    history_path.write_text(
+        "iteration,residual,CL\n1,1.0,0.10\n2,,0.20\n,0.3,0.30\nfoo,bar,0.40\n3,0.125,0.50\n",
+        encoding="utf-8",
+    )
+
+    points = main_mod.load_residual_history(history_path)
+    assert points == [
+        {"iteration": 1.0, "residual": 1.0},
+        {"iteration": 3.0, "residual": 0.125},
+    ]
+
+
+def test_report_defaults_do_not_fake_supported_solver_metadata(tmp_path, monkeypatch) -> None:
+    reset_app(tmp_path, monkeypatch)
+    from aero_agent_cfd_core.core import CFDCore, CFDResults
+    from aero_agent_contracts import MetricRecord
+
+    job_dir = tmp_path / "job"
+    normalized_dir = job_dir / "normalized"
+    geometry_dir = normalized_dir / "geometry"
+    mesh_dir = job_dir / "mesh"
+    results_dir = job_dir / "results"
+
+    geometry_dir.mkdir(parents=True, exist_ok=True)
+    mesh_dir.mkdir(parents=True, exist_ok=True)
+    results_dir.mkdir(parents=True, exist_ok=True)
+
+    (geometry_dir / "body_normalized.stl").write_bytes(tetra_stl())
+    (normalized_dir / "normalized_manifest.json").write_text("{}", encoding="utf-8")
+    (normalized_dir / "normalization_manifest.json").write_text("{}", encoding="utf-8")
+    (mesh_dir / "mesh_manifest.json").write_text("{}", encoding="utf-8")
+    (results_dir / "solver_run_manifest.json").write_text("{}", encoding="utf-8")
+    (job_dir / "snapshot_ref.json").write_text(
+        json.dumps({"preflight_id": "preflight-1", "source_file_name": "sample.stl"}),
+        encoding="utf-8",
+    )
+
+    solver_log_path = results_dir / "solver.log"
+    residual_history_path = results_dir / "history.csv"
+    coefficients_path = results_dir / "coefficients.csv"
+    solver_log_path.write_text("solver log", encoding="utf-8")
+    residual_history_path.write_text("iteration,residual\n", encoding="utf-8")
+    coefficients_path.write_text("CL,CD,Cm\n", encoding="utf-8")
+
+    report = CFDCore().build_report(
+        job_id="job-1",
+        job_dir=job_dir,
+        results=CFDResults(
+            solver_log_path=solver_log_path,
+            residual_history_path=residual_history_path,
+            coefficients_path=coefficients_path,
+            residual_history=[],
+            coefficients={"CL": 0.21, "CD": 0.025, "Cm": -0.018},
+            metrics=[
+                MetricRecord(name="CL", value=0.21),
+                MetricRecord(name="CD", value=0.025),
+                MetricRecord(name="Cm", value=-0.018),
+            ],
+            warnings=[],
+        ),
+    )
+
+    html = Path(report.html_path).read_text(encoding="utf-8")
+    assert "Selected solver: unknown" in html
+    assert "Execution mode: unavailable" in html
+    assert "AI assist mode: unavailable" in html
 
 
 def test_real_integration_only_when_runtime_present(tmp_path, monkeypatch) -> None:

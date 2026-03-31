@@ -1,0 +1,6 @@
+@echo off
+setlocal
+
+set "SCRIPT_DIR=%~dp0"
+call "%SCRIPT_DIR%start-app.bat"
+exit /b %ERRORLEVEL%

@@ -5,7 +5,9 @@ import type {
   ConnectionStatusResponse,
   DiagnosticIssue,
   InstallStatusResponse,
+  JobArtifact,
   JobEventRecord,
+  JobStatus,
   JobSummaryResponse,
   PreflightResponse,
   StreamHealth,
@@ -14,6 +16,15 @@ import type {
 export type RoutePane = "workspace" | "reports" | "settings";
 export type InspectorTab = "snapshot" | "run" | "artifacts" | "environment" | "diagnostics";
 export type ComposerScope = "draft" | "job";
+
+export interface PendingState {
+  boot: boolean;
+  preflight: boolean;
+  approve: boolean;
+  refresh: boolean;
+  cancel: boolean;
+  composer: boolean;
+}
 
 export interface ComposerNote {
   id: string;
@@ -44,8 +55,8 @@ export interface ShellState {
   selectedInspectorTab: InspectorTab;
   selectedArtifactKind: string | null;
   composerText: string;
-  busy: boolean;
-  notice: string | null;
+  pending: PendingState;
+  dismissedDiagnosticIds: string[];
 }
 
 export type ShellAction =
@@ -61,17 +72,20 @@ export type ShellAction =
   | { type: "ingest-jobs"; jobs: JobSummaryResponse[]; receivedAt: string }
   | { type: "upsert-job"; job: JobSummaryResponse; updatedAt: string | null }
   | { type: "select-job"; jobId: string | null }
+  | { type: "merge-job-status"; jobId: string; status?: JobStatus; progress?: number; error?: string | null; updatedAt?: string | null }
+  | { type: "merge-job-metrics"; jobId: string; metrics: Record<string, string | number>; updatedAt?: string | null }
+  | { type: "append-job-artifact"; jobId: string; artifact: JobArtifact; updatedAt?: string | null }
   | { type: "append-event"; jobId: string; event: JobEventRecord }
   | { type: "set-events"; jobId: string; events: JobEventRecord[] }
   | { type: "append-note"; scope: ComposerScope; text: string; createdAt: string }
   | { type: "append-diagnostic-issue"; issue: DiagnosticIssue }
-  | { type: "clear-diagnostics" }
+  | { type: "clear-diagnostics"; scope?: ComposerScope | "global"; subjectId?: string | null }
   | { type: "set-stream-health"; jobId: string; state: StreamHealth["state"]; patch?: Partial<StreamHealth> }
   | { type: "set-selected-inspector-tab"; tab: InspectorTab }
   | { type: "set-selected-artifact-kind"; kind: string | null }
   | { type: "set-composer-text"; text: string }
-  | { type: "set-busy"; busy: boolean }
-  | { type: "set-notice"; notice: string | null };
+  | { type: "set-pending"; key: keyof PendingState; pending: boolean }
+  | { type: "dismiss-diagnostic-issue"; issueId: string };
 
 export function createInitialDraft(): AnalysisFormState {
   return {
@@ -112,8 +126,15 @@ export function createInitialShellState(): ShellState {
     selectedInspectorTab: "snapshot",
     selectedArtifactKind: null,
     composerText: "",
-    busy: false,
-    notice: null,
+    pending: {
+      boot: false,
+      preflight: false,
+      approve: false,
+      refresh: false,
+      cancel: false,
+      composer: false,
+    },
+    dismissedDiagnosticIds: [],
   };
 }
 

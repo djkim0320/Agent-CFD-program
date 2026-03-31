@@ -1,14 +1,15 @@
-import { createContext, startTransition, useCallback, useContext, useMemo, useReducer, useRef, type ReactNode } from "react";
-import { getJob, listJobs } from "../lib/api";
+import { createContext, useContext, useMemo, useReducer, type ReactNode } from "react";
 import { createInitialShellState, shellReducer } from "./shellReducer";
 import { useComposerActions } from "./useComposerActions";
 import { useDiagnostics } from "./useDiagnostics";
 import { useRouteSync } from "./useRouteSync";
+import { getPrimaryDiagnosticIssue } from "./selectors";
 import { useSelectedJobStream } from "./useSelectedJobStream";
+import { useSessionQueries } from "./useSessionQueries";
 import { useSessionMutations } from "./useSessionMutations";
 import { useShellBoot } from "./useShellBoot";
 import type { RoutePane, ShellAction, ShellState, InspectorTab } from "./shellTypes";
-import type { AnalysisFormState, JobSummaryResponse } from "../lib/types";
+import type { AnalysisFormState } from "../lib/types";
 
 interface ShellContextValue {
   state: ShellState;
@@ -63,67 +64,8 @@ export function ShellProvider({ children }: { children: ReactNode }) {
     };
   });
 
-  const listRefreshTimerRef = useRef<number | null>(null);
   const { reportIssue, setStreamHealth, clearDiagnostics } = useDiagnostics(dispatch);
-
-  const refreshJobList = useCallback(
-    async (debounced = false) => {
-      const execute = async () => {
-        try {
-          const jobs = await listJobs();
-          startTransition(() => {
-            dispatch({ type: "ingest-jobs", jobs, receivedAt: new Date().toISOString() });
-          });
-        } catch (error) {
-          reportIssue({
-            scope: "global",
-            code: error instanceof Error ? error.name : "JOB_LIST_UNAVAILABLE",
-            title: "Session list unavailable",
-            detail: error instanceof Error ? error.message : "The session list could not be loaded.",
-            severity: "error",
-            raw: error,
-          });
-        }
-      };
-
-      if (!debounced) {
-        await execute();
-        return;
-      }
-
-      if (listRefreshTimerRef.current !== null) {
-        window.clearTimeout(listRefreshTimerRef.current);
-      }
-      listRefreshTimerRef.current = window.setTimeout(() => {
-        void execute();
-      }, 1200);
-    },
-    [dispatch, reportIssue],
-  );
-
-  const refreshJobById = useCallback(
-    async (jobId: string): Promise<JobSummaryResponse | null> => {
-      try {
-        const job = await getJob(jobId);
-        startTransition(() => {
-          dispatch({ type: "upsert-job", job, updatedAt: new Date().toISOString() });
-        });
-        return job;
-      } catch (error) {
-        reportIssue({
-          scope: "runtime",
-          subjectId: jobId,
-          code: error instanceof Error ? error.name : "JOB_REFRESH_FAILED",
-          title: "Selected session unavailable",
-          detail: error instanceof Error ? error.message : "The selected session could not be loaded.",
-          severity: "error",
-          raw: error,
-        });
-        return null;
-      }
-    },
-    [dispatch, reportIssue],
-  );
+  const { refreshJobList, refreshJobById } = useSessionQueries({ dispatch, reportIssue });
 
   useShellBoot({
     connectionMode: state.connectionMode,
@@ -182,9 +124,14 @@ export function ShellProvider({ children }: { children: ReactNode }) {
       setSelectedArtifactKind: (kind) => dispatch({ type: "set-selected-artifact-kind", kind }),
       setComposerText: (text) => dispatch({ type: "set-composer-text", text }),
       submitComposer,
-      clearNotice: () => dispatch({ type: "set-notice", notice: null }),
+      clearNotice: () => {
+        const primaryIssue = getPrimaryDiagnosticIssue(state);
+        if (primaryIssue) {
+          dispatch({ type: "dismiss-diagnostic-issue", issueId: primaryIssue.id });
+        }
+      },
     }),
-    [dispatch, sessionMutations.approveCurrentDraft, sessionMutations.cancelSelectedJob, sessionMutations.newAnalysis, sessionMutations.refreshSelectedJob, sessionMutations.runPreflight, sessionMutations.selectJob, submitComposer],
+    [dispatch, sessionMutations.approveCurrentDraft, sessionMutations.cancelSelectedJob, sessionMutations.newAnalysis, sessionMutations.refreshSelectedJob, sessionMutations.runPreflight, sessionMutations.selectJob, state, submitComposer],
   );
 
   return <ShellContext.Provider value={{ state, actions }}>{children}</ShellContext.Provider>;

@@ -21,11 +21,12 @@
 
 - Backend preflight / approval / worker separation is already in place.
 - Snapshot-backed execution and SSE events are already the active path.
-- GUI shell refactor is still the next major UX layer.
+- GUI shell is already active as `sidebar + workspace thread + composer + inspector`.
+- The next cleanup layer is de-mock discipline, stream refetch reduction, and clearer draft-vs-session separation.
 
-## Next UI layer
+## Current cleanup focus
 
-- Sidebar for recent sessions and settings.
-- Threaded workspace for preflight, approval, run, and artifact events.
-- Composer bar for quick actions.
-- Inspector drawer for hashes, blockers, and artifact metadata.
+- Keep the backend single-path flow intact.
+- Make the workspace more thread-native and stop mixing draft/session lanes.
+- Prefer incremental stream merge over hot-event refetches.
+- Keep raw payloads and decode issues inside inspector diagnostics, not in the main lane.

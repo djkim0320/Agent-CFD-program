@@ -730,9 +730,9 @@ class CFDCore:
                     "<h2>External Mesh</h2>",
                     f"<p>Strategy: {mesh_summary.get('mesh_strategy', 'box_farfield')}</p>",
                     f"<p>Farfield extents: {json.dumps(mesh_summary.get('farfield_extents', {}), ensure_ascii=True)}</p>",
-                    f"<p>Selected solver: {normalized_manifest.get('selected_solver', 'su2')}</p>",
-                    f"<p>Execution mode: {normalized_manifest.get('execution_mode', 'real')}</p>",
-                    f"<p>AI assist mode: {normalized_manifest.get('ai_assist_mode', 'unknown')}</p>",
+                    f"<p>Selected solver: {normalized_manifest.get('selected_solver', 'unknown')}</p>",
+                    f"<p>Execution mode: {normalized_manifest.get('execution_mode', 'unavailable')}</p>",
+                    f"<p>AI assist mode: {normalized_manifest.get('ai_assist_mode', 'unavailable')}</p>",
                     "<h2>Coefficients</h2>",
                     "<ul>",
                     f"<li>CL: {results.coefficients.get('CL', 0.0):.6f}</li>",
@@ -1247,27 +1247,24 @@ class CFDCore:
             reader = csv.DictReader(stream)
             for index, row in enumerate(reader, start=1):
                 normalized = {str(key).strip(): value for key, value in row.items() if key is not None}
-                iteration = self._parse_float(normalized, ["iteration", "Iter", "INNER_ITER"], default=float(index))
-                residual = self._parse_float(
-                    normalized,
-                    ["residual", "Residual", "RMS_RES", "Res_Flow[0]", "Res[0]"],
-                    default=0.0,
-                )
+                iteration = self._parse_float(normalized, ["iteration", "Iter", "INNER_ITER"])
+                residual = self._parse_float(normalized, ["residual", "Residual", "RMS_RES", "Res_Flow[0]", "Res[0]"])
+                if iteration is None or residual is None:
+                    continue
                 point = {"iteration": float(iteration), "residual": float(residual)}
-                cl = self._parse_float(normalized, ["CL", "cl", "LIFT", "Lift", "CLift", "C_l"], default=math.nan)
-                cd = self._parse_float(normalized, ["CD", "cd", "DRAG", "Drag", "CDrag", "C_d"], default=math.nan)
+                cl = self._parse_float(normalized, ["CL", "cl", "LIFT", "Lift", "CLift", "C_l"])
+                cd = self._parse_float(normalized, ["CD", "cd", "DRAG", "Drag", "CDrag", "C_d"])
                 cm = self._parse_float(
                     normalized,
                     ["CMz", "CM", "Cm", "cm", "MOMENT_Z", "Moment_Z", "C_m"],
-                    default=math.nan,
                 )
-                if math.isfinite(cl):
+                if cl is not None and math.isfinite(cl):
                     point["CL"] = cl
                     coefficients["CL"] = cl
-                if math.isfinite(cd):
+                if cd is not None and math.isfinite(cd):
                     point["CD"] = cd
                     coefficients["CD"] = cd
-                if math.isfinite(cm):
+                if cm is not None and math.isfinite(cm):
                     point["Cm"] = cm
                     coefficients["Cm"] = cm
                 residual_history.append(point)
@@ -1282,7 +1279,7 @@ class CFDCore:
             raise RuntimeError(f"Unable to extract coefficient summary from history file; missing {', '.join(missing)}.")
         return residual_history, coefficients
 
-    def _parse_float(self, row: dict[str, str | None], candidates: list[str], *, default: float) -> float:
+    def _parse_float(self, row: dict[str, str | None], candidates: list[str]) -> float | None:
         for candidate in candidates:
             if candidate not in row:
                 continue
@@ -1293,7 +1290,7 @@ class CFDCore:
                 return float(raw)
             except ValueError:
                 continue
-        return default
+        return None
 
     def _find_first_existing(self, candidates: list[Path]) -> Path | None:
         for candidate in candidates:

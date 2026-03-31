@@ -12,7 +12,7 @@ interface UseSessionMutationsArgs {
   refreshJobList: (debounced?: boolean) => Promise<void>;
   refreshJobById: (jobId: string) => Promise<JobSummaryResponse | null>;
   reportIssue: (input: DiagnosticIssueInput) => void;
-  clearDiagnostics?: () => void;
+  clearDiagnostics?: (filter?: { scope?: "draft" | "job" | "global"; subjectId?: string | null }) => void;
 }
 
 export function useSessionMutations({
@@ -27,6 +27,7 @@ export function useSessionMutations({
     if (!state.draft.geometryFile) {
       reportIssue({
         scope: "preflight",
+        subjectId: "draft",
         code: "GEOMETRY_REQUIRED",
         title: "Geometry file required",
         detail: "Choose a geometry file before generating a preflight snapshot.",
@@ -36,8 +37,7 @@ export function useSessionMutations({
       return;
     }
 
-    dispatch({ type: "set-busy", busy: true });
-    dispatch({ type: "set-notice", notice: null });
+    dispatch({ type: "set-pending", key: "preflight", pending: true });
 
     try {
       const preflight = await submitPreflight(state.draft, state.connectionMode);
@@ -52,6 +52,7 @@ export function useSessionMutations({
     } catch (error) {
       reportIssue({
         scope: "preflight",
+        subjectId: "draft",
         code: error instanceof Error ? error.name : "PREFLIGHT_FAILED",
         title: "Preflight blocked",
         detail: error instanceof Error ? error.message : "The preflight request failed.",
@@ -59,7 +60,7 @@ export function useSessionMutations({
         raw: error,
       });
     } finally {
-      dispatch({ type: "set-busy", busy: false });
+      dispatch({ type: "set-pending", key: "preflight", pending: false });
     }
   }, [dispatch, reportIssue, state.connectionMode, state.draft]);
 
@@ -67,6 +68,7 @@ export function useSessionMutations({
     if (!state.draftPreflight) {
       reportIssue({
         scope: "preflight",
+        subjectId: "draft",
         code: "PREFLIGHT_REQUIRED",
         title: "Preflight snapshot required",
         detail: "Generate a preflight snapshot before creating a persistent job.",
@@ -78,6 +80,7 @@ export function useSessionMutations({
     if (!canApprovePreflight(state.draftPreflight)) {
       reportIssue({
         scope: "preflight",
+        subjectId: "draft",
         code: "PREFLIGHT_BLOCKED",
         title: "Snapshot blocked",
         detail: "This snapshot cannot be approved for real execution.",
@@ -87,8 +90,7 @@ export function useSessionMutations({
       return;
     }
 
-    dispatch({ type: "set-busy", busy: true });
-    dispatch({ type: "set-notice", notice: null });
+    dispatch({ type: "set-pending", key: "approve", pending: true });
 
     try {
       const draftJob = await createJobFromPreflight(state.draftPreflight.preflight_id);
@@ -109,6 +111,7 @@ export function useSessionMutations({
     } catch (error) {
       reportIssue({
         scope: "runtime",
+        subjectId: state.selectedJobId ?? "draft",
         code: error instanceof Error ? error.name : "APPROVE_FAILED",
         title: "Approval failed",
         detail: error instanceof Error ? error.message : "The job could not be created or approved.",
@@ -116,7 +119,7 @@ export function useSessionMutations({
         raw: error,
       });
     } finally {
-      dispatch({ type: "set-busy", busy: false });
+      dispatch({ type: "set-pending", key: "approve", pending: false });
     }
   }, [dispatch, refreshJobList, reportIssue, state.draftPreflight]);
 
@@ -125,7 +128,7 @@ export function useSessionMutations({
       return;
     }
 
-    dispatch({ type: "set-busy", busy: true });
+    dispatch({ type: "set-pending", key: "refresh", pending: true });
     try {
       const refreshed = await refreshJobById(state.selectedJobId);
       if (!refreshed) {
@@ -145,7 +148,7 @@ export function useSessionMutations({
         raw: error,
       });
     } finally {
-      dispatch({ type: "set-busy", busy: false });
+      dispatch({ type: "set-pending", key: "refresh", pending: false });
     }
   }, [dispatch, refreshJobById, refreshJobList, reportIssue, state.selectedJobId]);
 
@@ -154,7 +157,7 @@ export function useSessionMutations({
       return;
     }
 
-    dispatch({ type: "set-busy", busy: true });
+    dispatch({ type: "set-pending", key: "cancel", pending: true });
     try {
       const job = await cancelJob(state.selectedJobId);
       dispatch({ type: "upsert-job", job, updatedAt: new Date().toISOString() });
@@ -170,15 +173,15 @@ export function useSessionMutations({
         raw: error,
       });
     } finally {
-      dispatch({ type: "set-busy", busy: false });
+      dispatch({ type: "set-pending", key: "cancel", pending: false });
     }
   }, [dispatch, refreshJobList, reportIssue, state.selectedJobId]);
 
   const newAnalysis = useCallback(() => {
     dispatch({ type: "reset-draft", draft: createInitialDraft() });
+    dispatch({ type: "select-job", jobId: null });
     dispatch({ type: "set-composer-text", text: "" });
-    dispatch({ type: "set-notice", notice: null });
-    clearDiagnostics?.();
+    clearDiagnostics?.({ scope: "draft" });
     dispatch({ type: "set-route-pane", pane: "workspace" });
   }, [clearDiagnostics, dispatch]);
 

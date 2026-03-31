@@ -90,6 +90,21 @@ export interface IssueRecord {
   guidance?: string | null;
 }
 
+export interface NormalizationSummary {
+  source_format?: string | null;
+  declared_unit: string;
+  canonical_unit: string;
+  scale_factor_to_meter: number;
+  axis_mapping: Record<string, string | null>;
+  source_bbox?: number[] | null;
+  normalized_bbox?: number[] | null;
+  face_count?: number | null;
+  component_count?: number | null;
+  watertight?: boolean | null;
+  repair_actions: string[];
+  caveats: string[];
+}
+
 export interface PreflightResponse {
   preflight_id: string;
   selected_solver: SolverKind;
@@ -107,7 +122,7 @@ export interface PreflightResponse {
   source_hash: string;
   normalized_manifest_hash: string;
   normalized_geometry_hash?: string | null;
-  normalization_summary?: Record<string, unknown> | null;
+  normalization_summary?: NormalizationSummary | null;
   physics_grade: "stable_trend_grade";
   mesh_strategy: "box_farfield";
   runtime_estimate_minutes: number;
@@ -122,10 +137,10 @@ export interface CreateJobRequest {
 
 export interface JobArtifact {
   kind: string;
-  name: string;
   path: string;
+  sha256?: string | null;
   size_bytes?: number | null;
-  download_url?: string | null;
+  created_at?: string | null;
 }
 
 export interface ResidualHistoryPoint {
@@ -148,6 +163,7 @@ export interface JobSummaryResponse {
   rationale?: string | null;
   progress: number;
   runtime_blockers: string[];
+  runtime_blocker_details: IssueRecord[];
   install_warnings: string[];
   ai_warnings: string[];
   policy_warnings: string[];

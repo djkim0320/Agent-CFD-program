@@ -1,5 +1,5 @@
 import { useCallback, type Dispatch } from "react";
-import { formatIssueNotice, createDiagnosticIssue } from "./diagnostics";
+import { createDiagnosticIssue } from "./diagnostics";
 import type { DiagnosticIssue, DiagnosticScope, DiagnosticSeverity, StreamHealth, StreamHealthState } from "../lib/types";
 import type { ShellAction } from "./shellTypes";
 
@@ -19,9 +19,6 @@ export function useDiagnostics(dispatch: Dispatch<ShellAction>) {
     }): DiagnosticIssue => {
       const issue = createDiagnosticIssue(input);
       dispatch({ type: "append-diagnostic-issue", issue });
-      if (input.showNotice !== false) {
-        dispatch({ type: "set-notice", notice: formatIssueNotice(issue) });
-      }
       return issue;
     },
     [dispatch],
@@ -34,8 +31,8 @@ export function useDiagnostics(dispatch: Dispatch<ShellAction>) {
     [dispatch],
   );
 
-  const clearDiagnostics = useCallback(() => {
-    dispatch({ type: "clear-diagnostics" });
+  const clearDiagnostics = useCallback((filter?: { scope?: "draft" | "job" | "global"; subjectId?: string | null }) => {
+    dispatch({ type: "clear-diagnostics", scope: filter?.scope, subjectId: filter?.subjectId });
   }, [dispatch]);
 
   return { reportIssue, setStreamHealth, clearDiagnostics };

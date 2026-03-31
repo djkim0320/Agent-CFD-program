@@ -14,14 +14,15 @@ interface UseShellBootArgs {
 export function useShellBoot({ connectionMode, dispatch, refreshJobList, reportIssue }: UseShellBootArgs) {
   useEffect(() => {
     let cancelled = false;
+    dispatch({ type: "set-pending", key: "boot", pending: true });
 
-    void loadInstallStatus()
-      .then((status) => {
+    const boot = async () => {
+      try {
+        const status = await loadInstallStatus();
         if (!cancelled) {
           dispatch({ type: "set-install-status", status });
         }
-      })
-      .catch((error) => {
+      } catch (error) {
         if (cancelled) {
           return;
         }
@@ -33,8 +34,14 @@ export function useShellBoot({ connectionMode, dispatch, refreshJobList, reportI
           severity: "error",
           raw: error,
         });
-      });
+      } finally {
+        if (!cancelled) {
+          dispatch({ type: "set-pending", key: "boot", pending: false });
+        }
+      }
+    };
 
+    void boot();
     void refreshJobList();
 
     return () => {

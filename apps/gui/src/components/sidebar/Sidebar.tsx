@@ -1,6 +1,13 @@
 import { useMemo } from "react";
 import { useShell } from "../../store/ShellProvider";
-import { describeProviderState, describeRuntimeState, formatTimestamp, getOverallState, getSidebarSessions } from "../../store/selectors";
+import {
+  describeAiReviewState,
+  describeDraftExecutionState,
+  describeProviderState,
+  describeRuntimeState,
+  formatTimestamp,
+  getSidebarSessions,
+} from "../../store/selectors";
 import { StatusBadge } from "../common/StatusBadge";
 
 function toneForSessionStatus(status: string): "neutral" | "good" | "warning" | "danger" {
@@ -13,7 +20,8 @@ function toneForSessionStatus(status: string): "neutral" | "good" | "warning" | 
 export function Sidebar() {
   const { state, actions } = useShell();
   const sessions = useMemo(() => getSidebarSessions(state), [state]);
-  const draftState = getOverallState(state.draftPreflight);
+  const draftExecutionState = describeDraftExecutionState(state.draftPreflight);
+  const draftAiState = describeAiReviewState(state.draftPreflight);
   const providerState = describeProviderState(state.connectionStatus);
   const runtimeState = describeRuntimeState(state.installStatus);
 
@@ -46,14 +54,28 @@ export function Sidebar() {
       <section className="sidebar-panel">
         <div className="sidebar-panel__header">
           <span>Current Draft</span>
-          <StatusBadge label={draftState} tone={draftState === "real" ? "good" : draftState === "blocked" ? "danger" : "neutral"} />
+          <button type="button" className="sidebar-panel__link" onClick={() => actions.selectJob(null)}>
+            Open draft
+          </button>
         </div>
         <strong>{state.draft.geometryFile?.name ?? "No geometry selected"}</strong>
-        <p>
-          {state.draftPreflight
-            ? `${state.draftPreflight.selected_solver} / ${state.draftPreflight.execution_mode}`
-            : "Draft remains provisional until a preflight snapshot is generated."}
-        </p>
+        <div className="sidebar-status-list">
+          <div className="sidebar-status-row">
+            <span>Execution</span>
+            <StatusBadge label={draftExecutionState.label} tone={draftExecutionState.tone} />
+          </div>
+          <p>{draftExecutionState.detail}</p>
+          <div className="sidebar-status-row">
+            <span>AI advisory</span>
+            <StatusBadge label={draftAiState.label} tone={draftAiState.tone} />
+          </div>
+          <p>{draftAiState.detail}</p>
+          <div className="sidebar-status-row">
+            <span>Runtime</span>
+            <StatusBadge label={runtimeState.label} tone={runtimeState.tone} />
+          </div>
+          <p>{runtimeState.detail}</p>
+        </div>
       </section>
 
       <section className="sidebar-panel">

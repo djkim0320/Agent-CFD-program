@@ -629,6 +629,7 @@ def to_job_summary(job: JobRecord) -> JobSummaryResponse:
         progress=job.progress,
         warnings=list(job.warnings),
         runtime_blockers=list(job.runtime_blockers),
+        runtime_blocker_details=build_runtime_blocker_details(job.runtime_blockers),
         install_warnings=list(job.install_warnings),
         ai_warnings=list(job.ai_warnings),
         policy_warnings=list(job.policy_warnings),
@@ -725,14 +726,16 @@ def load_residual_history(path: Path) -> list[dict[str, float]]:
     points: list[dict[str, float]] = []
     with path.open("r", encoding="utf-8", errors="ignore", newline="") as stream:
         reader = csv.DictReader(stream)
-        for index, row in enumerate(reader, start=1):
-            iteration = parse_float(row, ["iteration", "Iter", "INNER_ITER"], float(index))
-            residual = parse_float(row, ["residual", "Residual", "RMS_RES", "Res_Flow[0]", "Res[0]"], 0.0)
+        for row in reader:
+            iteration = parse_float(row, ["iteration", "Iter", "INNER_ITER"])
+            residual = parse_float(row, ["residual", "Residual", "RMS_RES", "Res_Flow[0]", "Res[0]"])
+            if iteration is None or residual is None:
+                continue
             points.append({"iteration": iteration, "residual": residual})
     return points
 
 
-def parse_float(row: dict[str, str | None], keys: list[str], default: float) -> float:
+def parse_float(row: dict[str, str | None], keys: list[str]) -> float | None:
     for key in keys:
         raw = row.get(key)
         if raw in (None, ""):
@@ -741,7 +744,7 @@ def parse_float(row: dict[str, str | None], keys: list[str], default: float) -> 
             return float(raw)
         except ValueError:
             continue
-    return default
+    return None
 
 
 def digest_payload(payload: Any) -> str:

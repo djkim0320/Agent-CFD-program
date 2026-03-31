@@ -397,6 +397,7 @@ class JobSummaryResponse(BaseModel):
     progress: int = 0
     warnings: list[str] = Field(default_factory=list)
     runtime_blockers: list[str] = Field(default_factory=list)
+    runtime_blocker_details: list[IssueRecord] = Field(default_factory=list)
     install_warnings: list[str] = Field(default_factory=list)
     ai_warnings: list[str] = Field(default_factory=list)
     policy_warnings: list[str] = Field(default_factory=list)

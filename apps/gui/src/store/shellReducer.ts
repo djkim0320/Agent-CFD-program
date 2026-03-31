@@ -41,8 +41,15 @@ export function createInitialShellState(): ShellState {
     selectedInspectorTab: "snapshot",
     selectedArtifactKind: null,
     composerText: "",
-    busy: false,
-    notice: null,
+    pending: {
+      boot: false,
+      preflight: false,
+      approve: false,
+      refresh: false,
+      cancel: false,
+      composer: false,
+    },
+    dismissedDiagnosticIds: [],
   };
 }
 
@@ -91,7 +98,6 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         ...state,
         draft: action.draft,
         draftPreflight: null,
-        selectedJobId: null,
         selectedArtifactKind: null,
         selectedInspectorTab: "snapshot",
       };
@@ -122,16 +128,12 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
           ...upsertJobRecord(nextState, job, action.receivedAt),
         };
       }
-      if (!nextState.selectedJobId && nextState.jobOrder.length > 0) {
-        nextState = { ...nextState, selectedJobId: nextState.jobOrder[0] };
-      }
       return nextState;
     }
     case "upsert-job":
       return {
         ...state,
         ...upsertJobRecord(state, action.job, action.updatedAt),
-        selectedJobId: state.selectedJobId ?? action.job.id,
       };
     case "select-job":
       return {
@@ -140,6 +142,62 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
         selectedArtifactKind: null,
         selectedInspectorTab: action.jobId ? "run" : "snapshot",
       };
+    case "merge-job-status": {
+      const record = state.jobsById[action.jobId];
+      if (!record) {
+        return state;
+      }
+      const nextJob = {
+        ...record.job,
+        status: action.status ?? record.job.status,
+        progress: action.progress ?? record.job.progress,
+        error: typeof action.error === "undefined" ? record.job.error : action.error,
+        updated_at: action.updatedAt ?? record.job.updated_at,
+      };
+      return {
+        ...state,
+        ...upsertJobRecord(state, nextJob, action.updatedAt ?? null),
+      };
+    }
+    case "merge-job-metrics": {
+      const record = state.jobsById[action.jobId];
+      if (!record) {
+        return state;
+      }
+      const nextJob = {
+        ...record.job,
+        metrics: {
+          ...record.job.metrics,
+          ...action.metrics,
+        },
+        updated_at: action.updatedAt ?? record.job.updated_at,
+      };
+      return {
+        ...state,
+        ...upsertJobRecord(state, nextJob, action.updatedAt ?? null),
+      };
+    }
+    case "append-job-artifact": {
+      const record = state.jobsById[action.jobId];
+      if (!record) {
+        return state;
+      }
+      const alreadyPresent = record.job.artifacts.some(
+        (artifact) => artifact.kind === action.artifact.kind && artifact.path === action.artifact.path,
+      );
+      if (alreadyPresent) {
+        return state;
+      }
+      const nextJob = {
+        ...record.job,
+        artifacts: [...record.job.artifacts, action.artifact],
+        updated_at: action.updatedAt ?? record.job.updated_at,
+      };
+      return {
+        ...state,
+        ...upsertJobRecord(state, nextJob, action.updatedAt ?? null),
+      };
+    }
     case "append-event": {
       const current = state.eventsByJobId[action.jobId] ?? [];
       if (current.some((event) => event.id === action.event.id || event.seq === action.event.seq)) {
@@ -183,12 +241,33 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
     case "append-diagnostic-issue":
       return {
         ...state,
+        dismissedDiagnosticIds: state.dismissedDiagnosticIds.filter((issueId) => issueId !== action.issue.id),
         diagnosticIssues: state.diagnosticIssues.some((issue) => issue.id === action.issue.id)
           ? state.diagnosticIssues
           : [...state.diagnosticIssues, action.issue],
       };
     case "clear-diagnostics":
-      return { ...state, diagnosticIssues: [] };
+      return {
+        ...state,
+        diagnosticIssues: state.diagnosticIssues.filter((issue) => {
+          if (action.subjectId && issue.subjectId !== action.subjectId) {
+            return true;
+          }
+          if (action.scope === "draft") {
+            return issue.subjectId !== "draft";
+          }
+          if (action.scope === "job") {
+            return issue.subjectId !== state.selectedJobId;
+          }
+          if (action.scope === "global") {
+            return issue.subjectId !== null;
+          }
+          if (!action.scope && !action.subjectId) {
+            return false;
+          }
+          return false;
+        }),
+      };
     case "set-stream-health":
       return {
         ...state,
@@ -207,10 +286,21 @@ export function shellReducer(state: ShellState, action: ShellAction): ShellState
       };
     case "set-composer-text":
       return { ...state, composerText: action.text };
-    case "set-busy":
-      return { ...state, busy: action.busy };
-    case "set-notice":
-      return { ...state, notice: action.notice };
+    case "set-pending":
+      return {
+        ...state,
+        pending: {
+          ...state.pending,
+          [action.key]: action.pending,
+        },
+      };
+    case "dismiss-diagnostic-issue":
+      return {
+        ...state,
+        dismissedDiagnosticIds: state.dismissedDiagnosticIds.includes(action.issueId)
+          ? state.dismissedDiagnosticIds
+          : [...state.dismissedDiagnosticIds, action.issueId],
+      };
     default:
       return state;
   }

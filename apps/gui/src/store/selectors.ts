@@ -4,7 +4,9 @@ import type {
   JobArtifact,
   JobEventRecord,
   JobSummaryResponse,
+  NormalizationSummary,
   PreflightResponse,
+  IssueRecord,
   StreamHealth,
 } from "../lib/types";
 import type { SessionRecord, ShellState } from "./shellTypes";
@@ -20,6 +22,10 @@ export interface DisplayStatus {
 export interface SummaryRow {
   label: string;
   value: string;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
 }
 
 const SEVERITY_WEIGHT: Record<DiagnosticIssue["severity"], number> = {
@@ -76,21 +82,33 @@ export function canApprovePreflight(preflight: PreflightResponse | null): boolea
   return Boolean(preflight && preflight.execution_mode === "real" && preflight.runtime_blockers.length === 0);
 }
 
-export function getOverallState(preflight: PreflightResponse | null): "draft" | "blocked" | "scaffold" | "unavailable" | "real" {
+export function describeDraftExecutionState(preflight: PreflightResponse | null): DisplayStatus {
   if (!preflight) {
-    return "draft";
+    return {
+      label: "Draft",
+      tone: "neutral",
+      detail: "Generate a preflight snapshot to determine execution readiness.",
+    };
   }
   if (preflight.runtime_blockers.length > 0) {
-    return "blocked";
+    return {
+      label: "Blocked",
+      tone: "danger",
+      detail: preflight.runtime_blockers[0] ?? "This snapshot is blocked for execution.",
+    };
   }
   if (preflight.execution_mode === "scaffold") {
-    return "scaffold";
+    return {
+      label: "Deferred",
+      tone: "warning",
+      detail: "This snapshot is not executable in the current real-path scope.",
+    };
   }
-  const aiState = preflight.ai_review_status ?? preflight.ai_assist_mode;
-  if (aiState === "unavailable" || aiState === "failed") {
-    return "unavailable";
-  }
-  return "real";
+  return {
+    label: "Ready",
+    tone: "good",
+    detail: "This snapshot can be approved for real execution.",
+  };
 }
 
 export function describeAiReviewState(preflight: PreflightResponse | null): DisplayStatus {
@@ -207,27 +225,45 @@ export function describeRuntimeState(installStatus: InstallStatusResponse | null
   };
 }
 
-export function getPrimaryDiagnosticIssue(state: ShellState): DiagnosticIssue | null {
-  if (state.diagnosticIssues.length === 0) {
-    return null;
-  }
-  return [...state.diagnosticIssues].sort((left, right) => {
-    const severityDelta = SEVERITY_WEIGHT[right.severity] - SEVERITY_WEIGHT[left.severity];
-    if (severityDelta !== 0) {
-      return severityDelta;
-    }
-    return right.createdAt.localeCompare(left.createdAt);
-  })[0];
-}
-
-export function getDiagnosticsForContext(state: ShellState): DiagnosticIssue[] {
-  return [...state.diagnosticIssues].sort((left, right) => {
+function sortDiagnostics(issues: DiagnosticIssue[]): DiagnosticIssue[] {
+  return [...issues].sort((left, right) => {
     const severityDelta = SEVERITY_WEIGHT[right.severity] - SEVERITY_WEIGHT[left.severity];
     if (severityDelta !== 0) {
       return severityDelta;
     }
     return right.createdAt.localeCompare(left.createdAt);
   });
+}
+
+function getVisibleDiagnostics(state: ShellState): DiagnosticIssue[] {
+  return state.diagnosticIssues.filter((issue) => !state.dismissedDiagnosticIds.includes(issue.id));
+}
+
+export function getAllDiagnostics(state: ShellState): DiagnosticIssue[] {
+  return sortDiagnostics(getVisibleDiagnostics(state));
+}
+
+export function getCurrentContextDiagnostics(state: ShellState): DiagnosticIssue[] {
+  const visible = getVisibleDiagnostics(state);
+  const currentSubject = state.selectedJobId ?? "draft";
+  return sortDiagnostics(visible.filter((issue) => issue.subjectId === currentSubject));
+}
+
+export function getGlobalDiagnostics(state: ShellState): DiagnosticIssue[] {
+  return sortDiagnostics(getVisibleDiagnostics(state).filter((issue) => issue.subjectId === null));
+}
+
+export function getPrimaryDiagnosticIssue(state: ShellState): DiagnosticIssue | null {
+  const contextIssues = getCurrentContextDiagnostics(state);
+  if (contextIssues.length > 0) {
+    return contextIssues[0];
+  }
+  const globalIssues = getGlobalDiagnostics(state);
+  return globalIssues.length > 0 ? globalIssues[0] : null;
+}
+
+export function getDiagnosticsForContext(state: ShellState): DiagnosticIssue[] {
+  return getCurrentContextDiagnostics(state);
 }
 
 export function getArtifactByKind(job: JobSummaryResponse | null, kind: string | null): JobArtifact | null {
@@ -285,34 +321,64 @@ function maybeRow(label: string, value: unknown): SummaryRow | null {
   return { label, value: rendered };
 }
 
-export function summarizeNormalizationSummary(summary: Record<string, unknown> | null | undefined): SummaryRow[] {
+export function summarizeNormalizationSummary(summary: NormalizationSummary | Record<string, unknown> | null | undefined): SummaryRow[] {
   if (!summary) {
     return [];
   }
+  const summaryRecord = summary as Record<string, unknown>;
   const rows = [
-    maybeRow("Canonical unit", summary.canonical_unit ?? summary.normalized_unit ?? summary.unit),
-    maybeRow("Declared unit", summary.declared_unit),
-    maybeRow("Scale factor", summary.applied_scale_factor ?? summary.scale_factor),
-    maybeRow("Forward axis", summary.forward_axis),
-    maybeRow("Up axis", summary.up_axis),
-    maybeRow("Axis mapping", summary.axis_mapping),
-    maybeRow("Source bbox", summary.source_bbox),
-    maybeRow("Normalized bbox", summary.normalized_bbox),
-    maybeRow("Geometry kind", summary.geometry_kind),
-    maybeRow("Watertight", summary.watertight),
-    maybeRow("Repairability", summary.repairability),
+    maybeRow("Canonical unit", summaryRecord.canonical_unit ?? summaryRecord.normalized_unit ?? summaryRecord.unit),
+    maybeRow("Declared unit", summaryRecord.declared_unit),
+    maybeRow("Scale factor", summaryRecord.scale_factor_to_meter ?? summaryRecord.applied_scale_factor ?? summaryRecord.scale_factor),
+    maybeRow("Forward axis", summaryRecord.forward_axis),
+    maybeRow("Up axis", summaryRecord.up_axis),
+    maybeRow("Axis mapping", summaryRecord.axis_mapping),
+    maybeRow("Source bbox", summaryRecord.source_bbox),
+    maybeRow("Normalized bbox", summaryRecord.normalized_bbox),
+    maybeRow("Geometry kind", summaryRecord.geometry_kind),
+    maybeRow("Watertight", summaryRecord.watertight),
+    maybeRow("Repairability", summaryRecord.repairability),
   ];
   return rows.filter((row): row is SummaryRow => row !== null);
 }
 
-export function summarizeRuntimeBlockerDetails(preflight: PreflightResponse | null): SummaryRow[] {
-  if (!preflight) {
+function summarizeIssueRecords(details: IssueRecord[] | null | undefined): SummaryRow[] {
+  if (!details || details.length === 0) {
     return [];
   }
-  return preflight.runtime_blocker_details.map((detail) => ({
+  return details.map((detail) => ({
     label: detail.code,
     value: detail.guidance ? `${detail.message} ${detail.guidance}` : detail.message,
   }));
+}
+
+export function summarizeRuntimeBlockerDetails(
+  source: Pick<PreflightResponse, "runtime_blocker_details"> | Pick<JobSummaryResponse, "runtime_blocker_details"> | null,
+): SummaryRow[] {
+  return summarizeIssueRecords(source?.runtime_blocker_details);
+}
+
+export function getArtifactDisplayName(artifact: JobArtifact): string {
+  switch (artifact.kind) {
+    case "report_html":
+      return "HTML report";
+    case "summary":
+      return "Summary payload";
+    case "viewer_bundle":
+      return "Viewer bundle";
+    case "case_bundle":
+      return "Case bundle";
+    case "solver_log":
+      return "Solver log";
+    case "mesh_log":
+      return "Mesh log";
+    case "residual_history":
+      return "Residual history";
+    case "coefficients":
+      return "Coefficients";
+    default:
+      return artifact.kind.replace(/_/g, " ");
+  }
 }
 
 export function describeJobEvent(event: JobEventRecord): DisplayStatus {
@@ -330,7 +396,9 @@ export function describeJobEvent(event: JobEventRecord): DisplayStatus {
             : payload.status === "failed" || payload.status === "cancelled"
               ? "danger"
               : "warning",
-        detail,
+        detail:
+          message ??
+          `${stringifyValue(payload.status) ?? "status"}${typeof payload.progress === "number" ? ` (${payload.progress}%)` : ""}`,
       };
     case "preflight.started":
       return { label: "Preflight started", tone: "neutral", detail };
@@ -351,11 +419,29 @@ export function describeJobEvent(event: JobEventRecord): DisplayStatus {
     case "solver.stdout":
       return { label: "Solver log", tone: "neutral", detail };
     case "solver.metrics":
-      return { label: "Solver metrics updated", tone: "good", detail };
+      return {
+        label: "Solver metrics updated",
+        tone: "good",
+        detail:
+          typeof payload.residual_history_points === "number"
+            ? `${payload.residual_history_points} residual points are now available.`
+            : `Updated metrics: ${Object.keys((payload.metrics as Record<string, unknown>) ?? {}).join(", ") || "coefficients"}.`,
+      };
     case "artifact.ready":
-      return { label: "Artifact ready", tone: "good", detail };
+      return {
+        label: "Artifact ready",
+        tone: "good",
+        detail:
+          isRecord(payload.artifact) && typeof payload.artifact.kind === "string"
+            ? `${getArtifactDisplayName(payload.artifact as unknown as JobArtifact)} published.`
+            : detail,
+      };
     case "report.ready":
-      return { label: "Report ready", tone: "good", detail };
+      return {
+        label: "Report ready",
+        tone: "good",
+        detail: stringifyValue(payload.report_path) ? "Report and summary paths are now available." : detail,
+      };
     case "job.completed":
       return { label: "Job completed", tone: "good", detail };
     case "job.failed":

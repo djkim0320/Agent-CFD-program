@@ -7,7 +7,9 @@ import {
   describeRuntimeState,
   formatTimestamp,
   getArtifactByKind,
-  getDiagnosticsForContext,
+  getArtifactDisplayName,
+  getCurrentContextDiagnostics,
+  getGlobalDiagnostics,
   getSelectedJob,
   summarizeNormalizationSummary,
   summarizeRuntimeBlockerDetails,
@@ -40,7 +42,8 @@ export function InspectorDrawer() {
   const { state, actions } = useShell();
   const selectedJob = useMemo(() => getSelectedJob(state), [state]);
   const selectedArtifact = getArtifactByKind(selectedJob, state.selectedArtifactKind);
-  const diagnostics = useMemo(() => getDiagnosticsForContext(state), [state]);
+  const contextDiagnostics = useMemo(() => getCurrentContextDiagnostics(state), [state]);
+  const globalDiagnostics = useMemo(() => getGlobalDiagnostics(state), [state]);
   const providerState = describeProviderState(state.connectionStatus);
   const runtimeState = describeRuntimeState(state.installStatus);
   const aiReviewState = describeAiReviewState(state.draftPreflight);
@@ -51,6 +54,7 @@ export function InspectorDrawer() {
     [state.draftPreflight],
   );
   const blockerRows = useMemo(() => summarizeRuntimeBlockerDetails(state.draftPreflight), [state.draftPreflight]);
+  const jobBlockerRows = useMemo(() => summarizeRuntimeBlockerDetails(selectedJob), [selectedJob]);
 
   return (
     <aside className="inspector-drawer">
@@ -237,6 +241,19 @@ export function InspectorDrawer() {
                 <strong>{selectedJob.artifacts.length}</strong>
               </div>
             </div>
+            {jobBlockerRows.length > 0 ? (
+              <>
+                <h4>Blocker guidance</h4>
+                <div className="inspector-card-grid">
+                  {jobBlockerRows.map((row) => (
+                    <div key={`${row.label}-${row.value}`} className="inspector-card">
+                      <span>{row.label}</span>
+                      <strong>{row.value}</strong>
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : null}
           </div>
         ) : (
           <EmptyState title="No session selected" body="Pick a session from the sidebar to inspect run details." />
@@ -257,24 +274,28 @@ export function InspectorDrawer() {
               <div className="inspector-card-grid">
                 <div className="inspector-card">
                   <span>Name</span>
-                  <strong>{selectedArtifact.name}</strong>
+                  <strong>{getArtifactDisplayName(selectedArtifact)}</strong>
                 </div>
                 <div className="inspector-card">
                   <span>Kind</span>
                   <strong>{selectedArtifact.kind}</strong>
                 </div>
-                <div className="inspector-card">
-                  <span>Path</span>
-                  <strong>{selectedArtifact.path}</strong>
-                </div>
-                <div className="inspector-card">
-                  <span>Download</span>
-                  <strong>{selectedArtifact.download_url ?? "Local path only"}</strong>
-                </div>
+              <div className="inspector-card">
+                <span>Path</span>
+                <strong>{selectedArtifact.path}</strong>
               </div>
-            ) : (
-              <EmptyState title="No artifact selected" body="Choose an artifact from the workspace thread to inspect its metadata." />
-            )}
+              <div className="inspector-card">
+                <span>SHA-256</span>
+                <strong>{selectedArtifact.sha256 ?? "Not published yet"}</strong>
+              </div>
+              <div className="inspector-card">
+                <span>Created</span>
+                <strong>{formatTimestamp(selectedArtifact.created_at)}</strong>
+              </div>
+            </div>
+          ) : (
+            <EmptyState title="No artifact selected" body="Choose an artifact from the workspace thread to inspect its metadata." />
+          )}
           </div>
         ) : (
           <EmptyState title="No artifacts yet" body="Artifact metadata appears here after you select a session and artifact." />
@@ -314,14 +335,42 @@ export function InspectorDrawer() {
           <div className="inspector-section__header">
             <div>
               <span>Diagnostics</span>
-              <strong>{diagnostics.length}</strong>
+              <strong>{contextDiagnostics.length + globalDiagnostics.length}</strong>
             </div>
           </div>
-          {diagnostics.length === 0 ? (
+          {contextDiagnostics.length === 0 && globalDiagnostics.length === 0 ? (
             <EmptyState title="No diagnostics yet" body="Decode, provider, stream, runtime, artifact, and preflight issues will surface here." />
           ) : (
             <div className="diagnostic-list">
-              {diagnostics.map((issue) => (
+              {contextDiagnostics.length > 0 ? <h4>Current context</h4> : null}
+              {contextDiagnostics.map((issue) => (
+                <article key={issue.id} className="diagnostic-card">
+                  <div className="diagnostic-card__header">
+                    <div>
+                      <span>{issue.scope}</span>
+                      <strong>{issue.title}</strong>
+                    </div>
+                    <StatusBadge label={issue.severity} tone={toneForDiagnostic(issue.severity)} />
+                  </div>
+                  <p>{issue.detail}</p>
+                  <dl className="inspector-kv">
+                    <dt>Code</dt>
+                    <dd>{issue.code}</dd>
+                    <dt>Impact</dt>
+                    <dd>{issue.impact ?? "Not provided"}</dd>
+                    <dt>Next action</dt>
+                    <dd>{issue.nextAction ?? "Not provided"}</dd>
+                  </dl>
+                  {issue.raw ? (
+                    <>
+                      <h4>Raw payload</h4>
+                      <pre className="json-block">{renderRaw(issue.raw)}</pre>
+                    </>
+                  ) : null}
+                </article>
+              ))}
+              {globalDiagnostics.length > 0 ? <h4>Global issues</h4> : null}
+              {globalDiagnostics.map((issue) => (
                 <article key={issue.id} className="diagnostic-card">
                   <div className="diagnostic-card__header">
                     <div>

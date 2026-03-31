@@ -12,9 +12,9 @@ Independent local-first aerodynamic analysis agent for a Windows desktop workflo
 
 ## UI direction
 
-- The GUI is being reorganized into a desktop-first app shell and conversational workbench.
-- The target shape is sidebar + thread workspace + composer + inspector, not a card dashboard.
-- The current backend single-path flow stays in place while the shell is refactored.
+- The GUI now runs as a desktop-first shell: sidebar + workspace thread + composer + inspector.
+- The current vNext cleanup focuses on de-mock discipline, incremental stream updates, and clearer draft vs session lanes.
+- The backend single-path flow stays intact while the shell becomes more thread-native and diagnostics stay in the inspector.
 
 ## Backend lifecycle notes
 
@@ -26,6 +26,7 @@ Independent local-first aerodynamic analysis agent for a Windows desktop workflo
 - AI advisory failures should surface as explicit unavailable/failed states; production UI paths should not treat provider fallback payloads as successful AI review.
 - Frontend contract decoding is expected to stay strict: missing required fields should fail fast rather than being defaulted into `real` / `su2` / `remote`.
 - Any provider fallback retained for local development must be explicit and opt-in, not a silent production behavior.
+- User-facing GUI code does not keep a client-side mock helper path; any future fixtures belong in test/dev-only locations.
 
 ## Structure
 
@@ -39,9 +40,15 @@ Independent local-first aerodynamic analysis agent for a Windows desktop workflo
 
 - Install Python dependencies: `uv sync --group dev`
 - Install frontend dependencies: `pnpm.cmd --dir apps/gui install`
+- Start everything with one launcher: `run-aero-agent.bat`
 - Start the API: `powershell -ExecutionPolicy Bypass -File scripts/start-api.ps1`
+- Start the API from `cmd` or Explorer: `scripts\\start-api.bat`
 - Start the GUI: `powershell -ExecutionPolicy Bypass -File scripts/start-gui.ps1`
+- Start the GUI from `cmd` or Explorer: `scripts\\start-gui.bat`
+- Start API + GUI together in separate windows: `scripts\\start-workbench.bat`
+- Alternate combined launcher: `scripts\\start-app.bat`
 - Run API tests: `powershell -ExecutionPolicy Bypass -File scripts/test-api.ps1`
+- Run API tests from `cmd` or Explorer: `scripts\\test-api.bat`
 - Build the GUI: `pnpm.cmd --dir apps/gui build`
 
 ## Provider notes

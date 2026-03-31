@@ -10,6 +10,7 @@ import type {
   JobEventRecord,
   JobEventType,
   JobSummaryResponse,
+  NormalizationSummary,
   PreflightResponse,
   SolverKind,
   SubagentFindings,
@@ -216,6 +217,53 @@ function decodeIssueRecord(raw: unknown, path: string): IssueRecord {
   };
 }
 
+function decodeStringNullableRecord(raw: unknown, path: string, field: string): Record<string, string | null> {
+  const record = requireRecord(raw, path, field);
+  const decoded: Record<string, string | null> = {};
+  for (const [key, value] of Object.entries(record)) {
+    if (value === null || typeof value === "undefined") {
+      decoded[key] = null;
+      continue;
+    }
+    if (typeof value !== "string") {
+      throw new ApiDecodeError(path, `${field}.${key} must be a string or null`, value);
+    }
+    decoded[key] = value;
+  }
+  return decoded;
+}
+
+function decodeOptionalNumberArray(raw: unknown, path: string, field: string): number[] | null {
+  if (raw === null || typeof raw === "undefined") {
+    return null;
+  }
+  if (!Array.isArray(raw)) {
+    throw new ApiDecodeError(path, `${field} must be an array of numbers or null`, raw);
+  }
+  return raw.map((item, index) => requireNumber(item, `${path}.${field}[${index}]`, field));
+}
+
+function decodeNormalizationSummary(raw: unknown, path: string): NormalizationSummary {
+  const record = requireRecord(raw, path, "normalization_summary");
+  return {
+    source_format: requireOptionalString(record.source_format, path, "source_format"),
+    declared_unit: requireString(record.declared_unit, path, "declared_unit"),
+    canonical_unit: requireString(record.canonical_unit, path, "canonical_unit"),
+    scale_factor_to_meter: requireNumber(record.scale_factor_to_meter, path, "scale_factor_to_meter"),
+    axis_mapping: decodeStringNullableRecord(record.axis_mapping, path, "axis_mapping"),
+    source_bbox: decodeOptionalNumberArray(record.source_bbox, path, "source_bbox"),
+    normalized_bbox: decodeOptionalNumberArray(record.normalized_bbox, path, "normalized_bbox"),
+    face_count: requireOptionalNumber(record.face_count, path, "face_count"),
+    component_count: requireOptionalNumber(record.component_count, path, "component_count"),
+    watertight:
+      record.watertight === null || typeof record.watertight === "undefined"
+        ? null
+        : requireBoolean(record.watertight, path, "watertight"),
+    repair_actions: requireStringArray(record.repair_actions, path, "repair_actions"),
+    caveats: requireStringArray(record.caveats, path, "caveats"),
+  };
+}
+
 function decodeConnectionStatus(raw: unknown, connectionId: ConnectionMode, path: string): ConnectionStatusResponse {
   const record = requireRecord(raw, path, "connection status");
   const connection_id = requireString(record.connection_id, path, "connection_id");
@@ -249,7 +297,7 @@ function decodePreflightResponse(raw: unknown, path: string): PreflightResponse 
   const normalizationSummary =
     record.normalization_summary === null || typeof record.normalization_summary === "undefined"
       ? null
-      : requireRecord(record.normalization_summary, path, "normalization_summary");
+      : decodeNormalizationSummary(record.normalization_summary, `${path}.normalization_summary`);
   const subagentFindings =
     record.subagent_findings === null || typeof record.subagent_findings === "undefined"
       ? null
@@ -293,10 +341,10 @@ function decodeJobArtifact(raw: unknown, path: string): JobSummaryResponse["arti
   const record = requireRecord(raw, path, "artifact");
   return {
     kind: requireString(record.kind, path, "kind"),
-    name: requireString(record.name, path, "name"),
     path: requireString(record.path, path, "path"),
+    sha256: requireOptionalString(record.sha256, path, "sha256"),
     size_bytes: requireOptionalNumber(record.size_bytes, path, "size_bytes"),
-    download_url: requireOptionalString(record.download_url, path, "download_url"),
+    created_at: requireOptionalString(record.created_at, path, "created_at"),
   };
 }
 
@@ -356,6 +404,11 @@ function decodeJobSummary(raw: unknown, path: string): JobSummaryResponse {
     rationale: requireOptionalString(record.rationale, path, "rationale"),
     progress: requireNumber(record.progress, path, "progress"),
     runtime_blockers: requireStringArray(record.runtime_blockers, path, "runtime_blockers"),
+    runtime_blocker_details: Array.isArray(record.runtime_blocker_details)
+      ? record.runtime_blocker_details.map((detail, index) => decodeIssueRecord(detail, `${path}.runtime_blocker_details[${index}]`))
+      : (() => {
+          throw new ApiDecodeError(path, "runtime_blocker_details must be an array", record.runtime_blocker_details);
+        })(),
     install_warnings: requireStringArray(record.install_warnings, path, "install_warnings"),
     ai_warnings: requireStringArray(record.ai_warnings, path, "ai_warnings"),
     policy_warnings: requireStringArray(record.policy_warnings, path, "policy_warnings"),
@@ -390,6 +443,52 @@ function decodeJobEventRecord(raw: unknown, jobId: string, path: string): JobEve
     event_type: decodeJobEventType(record.event_type, path),
     payload: requireRecord(record.payload, path, "payload"),
     created_at: requireString(record.created_at, path, "created_at"),
+  };
+}
+
+export function decodeJobStatusEventPayload(raw: unknown, path: string) {
+  const record = requireRecord(raw, path, "job.status payload");
+  return {
+    status: requireEnum(record.status, path, "status", [
+      "uploaded",
+      "preflighting",
+      "waiting_approval",
+      "queued",
+      "running",
+      "postprocessing",
+      "completed",
+      "failed",
+      "cancelled",
+    ] as const),
+    progress: typeof record.progress === "undefined" ? null : requireNumber(record.progress, path, "progress"),
+    phase: requireOptionalString(record.phase, path, "phase"),
+    message: requireOptionalString(record.message, path, "message"),
+  };
+}
+
+export function decodeSolverMetricsEventPayload(raw: unknown, path: string) {
+  const record = requireRecord(raw, path, "solver.metrics payload");
+  return {
+    metrics: decodeMetrics(record.metrics, `${path}.metrics`),
+    residual_history_points:
+      typeof record.residual_history_points === "undefined"
+        ? null
+        : requireNumber(record.residual_history_points, path, "residual_history_points"),
+  };
+}
+
+export function decodeArtifactReadyEventPayload(raw: unknown, path: string) {
+  const record = requireRecord(raw, path, "artifact.ready payload");
+  return {
+    artifact: decodeJobArtifact(record.artifact, `${path}.artifact`),
+  };
+}
+
+export function decodeReportReadyEventPayload(raw: unknown, path: string) {
+  const record = requireRecord(raw, path, "report.ready payload");
+  return {
+    report_path: requireOptionalString(record.report_path, path, "report_path"),
+    summary_path: requireOptionalString(record.summary_path, path, "summary_path"),
   };
 }
 
